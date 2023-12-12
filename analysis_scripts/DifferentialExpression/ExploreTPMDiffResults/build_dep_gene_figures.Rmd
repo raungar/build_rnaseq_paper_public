@@ -1,0 +1,1516 @@
+---
+title: "Build RNA Bench Figures Play"
+author: "P Goddard"
+date: '2023-09-03'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+library(ggsankey)
+library(data.table)
+library(tidyverse)
+.libPaths("/home/pgoddard/R/x86_64-pc-linux-gnu-library/4.1")
+
+`%notin%` <- Negate(`%in%`)
+
+```
+
+
+# Load main table
+
+```{r}
+main_file = "/oak/stanford/groups/smontgom/shared/UDN/Analysis/ReferenceComparisonPrimary/all_genes_annotated_stupid_big.diffexp.mappingstats.outliers.updated_Oct2023.tsv"
+# main_lite_file = "/oak/stanford/groups/smontgom/shared/UDN/Analysis/ReferenceComparisonPrimary/all_genes_annotated.updated_clean_Oct2023.tsv"
+
+main_table = fread(main_file)
+# main_lite = fread(main_lite_file)
+
+```
+
+# Summarize per gene
+
+## build-exclusive (from rachel)
+
+```{r}
+
+remove_thresholded <- function(main_table,build1,build2,n_sample_thresh=2){
+  threshold_removed=main_table%>%
+    dplyr::filter(get(paste0("is_expressed_30pct_",build1))!=get(paste0("is_expressed_30pct_",build2)))
+  
+  dic_tiss_to_numsamples=c(282,63,8,10,8,6)
+  names(dic_tiss_to_numsamples)=c('Blood','Fibroblast','Muscle','PBMC','iPS','iPSC_NPC')
+  dic_tiss_to_thresholdsamples=floor(c(282,63,8,10,8,6)*.3)
+  names(dic_tiss_to_thresholdsamples)=c('Blood','Fibroblast','Muscle','PBMC','iPS','iPSC_NPC')
+  threshold_removed=threshold_removed%>%mutate(total_samples_tissue=dic_tiss_to_numsamples[tissue],
+                                               num_samples_threshold_tissue=dic_tiss_to_thresholdsamples[tissue])
+  threshold_removed=threshold_removed%>%
+    mutate(near_threshold=ifelse(get(paste0("is_expressed_30pct_",build1))==0,
+                                 ifelse(num_samples_threshold_tissue-n_sample_thresh>get(paste0("n_samples_expressed_",build1)),
+                                        "not_threshold","threshold"),
+                                 ifelse(num_samples_threshold_tissue-n_sample_thresh>get(paste0("n_samples_expressed_",build2)),
+                                        "not_threshold","threshold")
+    )
+    )
+  threshold_removed=threshold_removed%>%
+    mutate("n_samples_fromthreshold_build1"=get(paste0("n_samples_expressed_",build1))-num_samples_threshold_tissue)%>%
+    mutate("n_samples_fromthreshold_build2"=get(paste0("n_samples_expressed_",build2))-num_samples_threshold_tissue)%>%
+    mutate('n_samples_fromthreshold'=ifelse(n_samples_fromthreshold_build2<n_samples_fromthreshold_build1,n_samples_fromthreshold_build2,n_samples_fromthreshold_build1))
+  threshold_plot=ggplot(threshold_removed,aes(x=as.numeric(n_samples_fromthreshold)))+
+    geom_histogram()+
+    theme_bw()+
+    xlab("distance from number of sample threshold")+ ylab(paste0("frequency")) +
+    facet_wrap(~tissue,scales = "free")+ggtitle(paste0((build1)," vs ",(build2)))
+  plot(threshold_plot)
+  return(threshold_removed%>%dplyr::filter(near_threshold=="not_threshold"))
+}
+
+get_exp_only_one_build<-function(main_table,build1,build2,remove_threshold=FALSE){
+
+  exp_only_one_build=main_table%>%
+    dplyr::filter(get(paste0("is_expressed_30pct_",build1))!=get(paste0("is_expressed_30pct_",build2)))
+  #remove those near the threshold, which is less than 3 samples more than other group
+  if(remove_threshold==TRUE){
+    exp_only_one_build=remove_thresholded(exp_only_one_build,build1,build2)
+  }
+  
+  num_genes_only_build1=exp_only_one_build%>%dplyr::filter(get(paste0("is_expressed_30pct_",build1))==1)%>%pull(gene_id)%>%unique()%>%length()
+  num_genes_only_build2=exp_only_one_build%>%dplyr::filter(get(paste0("is_expressed_30pct_",build2))==1)%>%pull(gene_id)%>%unique()%>%length()
+  exp_only_one_build_omim=exp_only_one_build%>%dplyr::filter(is_omim_gene==1)%>%pull(gene_id)%>%unique()%>%length()
+  
+exp_only_one_build%>%dplyr::filter(is_omim_gene==1)
+  
+  print(paste0("Across all tissues there were ", length(unique(exp_only_one_build$gene_id)), " genes quantified in just one build. Of these ",
+               num_genes_only_build1, " were quantified in just ", build1, " and ", num_genes_only_build2, " in ", build2, ".",
+              " Of these build-specific quantified gene, ", exp_only_one_build_omim, " were OMIM genes."))
+  if(build1=='hg19'){
+    exp_only_one_build_forupset=exp_only_one_build%>%select(gene_id, tissue, is_opentargets_gene, is_clinvar_gene, is_omim_gene, is_cancer_gene,
+                                                  (paste0("diff_mean_prop_multimapped.",build2,"_",build1)),
+                                                  (paste0(build1,"_",build2,"_gene_model_comparison")),
+                                                  (paste0(build1,"_blacklist_reason")),(paste0(build2,"_blacklist_reason")),
+                                                  (paste0(build1,"_issue")), (paste0(build2,"_issue")),
+                                                  (paste0("featBiotype.",build1)), (paste0("featBiotype.",build2)),
+                                                  build_change_h38_hg19,discrep_var_hg38_hg19)%>%
+      mutate(is_clinically_relevant=ifelse(is_opentargets_gene+is_clinvar_gene+is_omim_gene+is_cancer_gene>=1,1,0))%>%
+      mutate(is_clinically_relevant=ifelse(is.na(is_clinically_relevant),0,is_clinically_relevant))%>%
+      mutate(gene_model_difference=ifelse(is.na(hg19_hg38_gene_model_comparison)|hg19_hg38_gene_model_comparison=='identical',0,1))%>%
+      mutate(biotype_difference=ifelse(featBiotype.hg19==featBiotype.hg38,0,1))%>%
+      mutate(blacklisted=ifelse(is.na(hg38_blacklist_reason)&is.na(hg19_blacklist_reason),0,1))%>%
+      mutate(known_issue=ifelse(is.na(hg38_issue)&is.na(hg19_issue),0,1))%>%
+      mutate(diff_multimapped=ifelse(diff_mean_prop_multimapped.hg38_hg19>0.01&!is.na(diff_mean_prop_multimapped.hg38_hg19),1,0))%>%
+      mutate(build_difference=ifelse(!is.na(build_change_h38_hg19),1,0))%>%
+      mutate(enriched_discrepant_variants=ifelse(!is.na(discrep_var_hg38_hg19),1,0))%>%
+      select(-diff_mean_prop_multimapped.hg38_hg19,-tissue,-is_opentargets_gene,-is_clinvar_gene,-is_omim_gene,-is_cancer_gene,
+             -hg19_hg38_gene_model_comparison,-is_clinically_relevant,-enriched_discrepant_variants,
+             -hg19_blacklist_reason,-hg38_blacklist_reason,-hg38_issue,-hg19_issue,
+             -(paste0("featBiotype.",build1)), -(paste0("featBiotype.",build2)),
+             -build_change_h38_hg19,-discrep_var_hg38_hg19
+             )%>%
+      unique() # make regardless of tissue
+  }else{
+    exp_only_one_build_forupset=exp_only_one_build%>%select(gene_id, tissue, is_opentargets_gene, is_clinvar_gene, is_omim_gene, is_cancer_gene,
+                                                  (paste0("diff_mean_prop_multimapped.",build2,"_",build1)),
+                                                  (paste0(build1,"_",build2,"_annotation_comparison")),
+                                                  (paste0(build1,"_",build2,"_gene_model_comparison")),
+                                                  (paste0(build1,"_blacklist_reason")),(paste0(build2,"_blacklist_reason")),
+                                                  (paste0(build1,"_issue")), (paste0(build2,"_issue")),
+                                                  (paste0("featBiotype.hg38")), (paste0("featBiotype.T2T")),
+                                                  build_change_chm13uniqregion,build_change_chm13_hg38_medically_relevant_genes
+                                                  )%>%
+      mutate(is_clinically_relevant=ifelse(is_opentargets_gene+is_clinvar_gene+is_omim_gene+is_cancer_gene>=1,1,0))%>%
+      mutate(is_clinically_relevant=ifelse(is.na(is_clinically_relevant),0,is_clinically_relevant))%>%
+      mutate(gene_model_difference=ifelse(is.na(hg38_chm13_gene_model_comparison)|hg38_chm13_gene_model_comparison=='identical',0,1))%>%
+      mutate(biotype_difference=ifelse(featBiotype.T2T==featBiotype.hg38,0,1))%>%
+      mutate(blacklisted=ifelse(is.na(hg38_blacklist_reason)&is.na(chm13_blacklist_reason),0,1))%>%
+      mutate(known_issue=ifelse(is.na(hg38_issue)&is.na(chm13_issue),0,1))%>%
+      mutate(diff_multimapped=ifelse(diff_mean_prop_multimapped.chm13_hg38>0.01&!is.na(diff_mean_prop_multimapped.chm13_hg38),1,0))%>%
+      mutate(build_difference=ifelse(build_change_chm13uniqregion==1|!is.na(build_change_chm13_hg38_medically_relevant_genes),1,0))%>%
+      select(-diff_mean_prop_multimapped.chm13_hg38,-tissue,-is_opentargets_gene,-is_clinvar_gene,-is_omim_gene,-is_cancer_gene,
+             -hg38_chm13_annotation_comparison,-hg38_chm13_annotation_comparison,-hg38_chm13_gene_model_comparison,
+             -chm13_blacklist_reason,-hg38_blacklist_reason,-hg38_issue,-chm13_issue,-is_clinically_relevant,
+             -(paste0("featBiotype.hg38")), -(paste0("featBiotype.T2T")),
+             -build_change_chm13uniqregion,-build_change_chm13_hg38_medically_relevant_genes)%>%
+      unique() # make regardless of tissue
+  }
+  
+
+  # UpSetR::upset(exp_only_one_build_forupset,order.by	= 'freq',nsets = 7,set_size.show=TRUE,text.scale = 1.5)
+  my_upsetplot=ComplexUpset::upset(exp_only_one_build_forupset,colnames(exp_only_one_build_forupset)[-1], width_ratio=0.1, #sort_intersections_by='degree',
+                      base_annotations=list('Size'=(intersection_size(text_colors=c(on_background='black',on_bar='black'),
+                                                                      mapping=aes(fill='bars_color'),
+                                                                      counts=T, text = aes(size = 4)))+ 
+                                              scale_fill_manual(values=c('bars_color'='#8ab0ba'), guide='none')
+                                            ),
+                      set_sizes=(
+                        upset_set_size()
+                        + geom_text(aes(label=..count..), hjust=1.1, stat='count')
+                        # you can also add annotations on top of bars:
+                        # + annotate(geom='text', label='@', x='Drama', y=1850, color='white', size=3)
+                        + expand_limits(y=nrow(exp_only_one_build_forupset)))
+                        + theme(axis.text.x=element_text(angle=45))
+                      )+ggtitle(paste0("build exclusive genes ",build1, ":", build2))
+  
+  med_exp_only_one_build_data=exp_only_one_build%>%
+    mutate(uniq_build_exp=ifelse(get(paste0("is_expressed_30pct_",build1))==1,build1,build2),
+           median_tpm_exp=ifelse(get(paste0("is_expressed_30pct_",build1))==1,get(paste0("median_tpm_expressed_",build1)),get(paste0("median_tpm_expressed_",build2)))
+           )%>%select(uniq_build_exp,median_tpm_exp,gene_id,tissue)
+  my_med_exp_plot=ggplot(exp_only_one_build)
+  plot(my_upsetplot)
+  #intersection_size(counts=T, text = aes(size = 2))
+  print(round(colSums(exp_only_one_build_forupset%>%mutate(blacklist_or_issue=ifelse(blacklisted+known_issue>=1,1,0))%>%
+                        select(-gene_id), na.rm = T)/nrow(exp_only_one_build_forupset)  *100))
+  return(med_exp_only_one_build_data)
+}
+
+```
+
+```{r}
+library(ComplexUpset)
+get_exp_only_one_build(main_table,'hg19','hg38',remove_threshold=TRUE)
+get_exp_only_one_build(main_table,'hg38','chm13',remove_threshold=TRUE)
+
+```
+
+## general
+
+### reference data
+
+```{r}
+# numbers for build-exclusive sample count minimums
+dic_tiss_to_numsamples = c(282,63,8,10,8,6)
+names(dic_tiss_to_numsamples) = c('Blood','Fibroblast','Muscle','PBMC','iPS','iPSC_NPC')
+  
+dic_tiss_to_min_samples = floor(c(282,63,8,10,8,6)*.3)
+names(dic_tiss_to_min_samples) = c('Blood','Fibroblast','Muscle','PBMC','iPS','iPSC_NPC')
+
+
+# clean up feature BioType details
+reg_rna = c("snRNA", "snoRNA", "scaRNA", "siRNA", "miRNA", "piRNA", "vault_RNA", "scRNA", "sRNA")
+housekeeping_rna = c("tRNA", "rRNA", "Mt_tRNA", "Mt_rRNA", "ribozyme")
+func_rna = c(housekeeping_rna, reg_rna)
+nonfunc_rna = c("misc_RNA", "antisense", "sense_intronic", "processed_transcript", "sense_overlapping")
+t2t_spec = c("StringTie")
+```
+
+### main clean
+
+```{r}
+main_table_cleaned = main_table %>% 
+  
+  # remove excess columns
+  dplyr::select(-starts_with("num_"), -"omim_confidence", -"omim_status", -contains("pseudogene"), -contains("paralog"),
+                -contains("mean_tpm_expressed_"), #-starts_with("n_samples_expressed"),
+                -contains("_num_counts_"), # -contains("_mapped_"), -starts_with("prop_mean_multi"), 
+                -starts_with("outliers_z3diff05"), -starts_with("mean_abs_zdiff"), 
+                -ends_with("_samples")) %>% 
+  
+  # create medically relevant summary column
+  mutate(is_medically_relevant = ifelse(is_opentargets_gene==1 | 
+                                          is_omim_gene==1 | 
+                                          is_clinvar_gene==1 | 
+                                          is_cancer_gene==1 | 
+                                          is_candidate_gene==1, 
+                                        1, 0)) %>% 
+  
+  # create expressed tissue placeholder columns to summarize on
+  mutate(hg19_expressed_tissue = ifelse(is_expressed_30pct_hg19 == 1, tissue, NA)) %>%
+  mutate(hg38_expressed_tissue = ifelse(is_expressed_30pct_hg38 == 1, tissue, NA)) %>%
+  mutate(chm13_expressed_tissue = ifelse(is_expressed_30pct_chm13 == 1, tissue, NA)) %>%
+  
+  # clean up annotation_comparison label for events that should be 1_to_1
+  mutate(hg19_hg38_annotation_comparison = ifelse(gene_name_hg19 == gene_name_hg38 & is.na(hg19_hg38_annotation_comparison),
+                                                  "1_to_1", hg19_hg38_annotation_comparison)) %>% 
+  mutate(hg38_chm13_annotation_comparison = ifelse(gene_name_chm13 == gene_name_hg38 & is.na(hg38_chm13_annotation_comparison),
+                                                  "1_to_1", hg38_chm13_annotation_comparison)) %>% 
+  
+  # clean up hg38 vs chm13 annotation comparison
+  mutate(hg38_chm13_annotation_comparison = 
+           ifelse(str_detect(hg38_chm13_annotation_comparison, "hg38"), "hg38_specific",
+                  ifelse(str_detect(hg38_chm13_annotation_comparison,"chm13"), "chm13_specific", 
+                         hg38_chm13_annotation_comparison))) %>% 
+  
+  # label annotation-specific events
+  mutate(hg19_hg38.annotation_specific = ifelse(hg19_hg38_annotation_comparison == "hg19_specific", "hg19",
+                                               ifelse(hg19_hg38_annotation_comparison == "hg38_specific", "hg38", NA))) %>% 
+  mutate(hg38_chm13.annotation_specific = ifelse(hg38_chm13_annotation_comparison == "chm13_specific", "chm13",
+                                               ifelse(hg38_chm13_annotation_comparison == "hg38_specific", "hg38", NA))) %>% 
+  mutate(is_annotation_specific = ifelse(!is.na(hg19_hg38.annotation_specific) | 
+                                           !is.na(hg38_chm13.annotation_specific), 1, 0)) %>% 
+  
+  # label build-exclusive events for easier summarizing
+  # the "n_samples_expressed_hg19-dic_tiss_to_min_samples[tissue]>2" term 
+  # is the "no threshold effects term" based on Rachel's code
+  mutate(hg19_hg38.build_exclusive = 
+           ifelse(is_expressed_30pct_hg19 == 1 & is_expressed_30pct_hg38 == 0 & 
+                    dic_tiss_to_min_samples[tissue]-2>n_samples_expressed_hg38, "hg19",
+             
+             ifelse(is_expressed_30pct_hg19 == 0 & is_expressed_30pct_hg38 == 1 & 
+                    dic_tiss_to_min_samples[tissue]-2>n_samples_expressed_hg19, "hg38", NA))
+         ) %>% 
+  
+  mutate(hg38_chm13.build_exclusive = 
+           ifelse(is_expressed_30pct_chm13 == 1 & is_expressed_30pct_hg38 == 0 &
+                  dic_tiss_to_min_samples[tissue]-2>n_samples_expressed_hg38, "chm13",
+                  
+              ifelse(is_expressed_30pct_chm13 == 0 & is_expressed_30pct_hg38 == 1 &
+                     dic_tiss_to_min_samples[tissue]-2>n_samples_expressed_chm13, "hg38", NA))
+         ) %>% 
+  
+  mutate(build_exclusive_tissue = ifelse(!is.na(hg19_hg38.build_exclusive) | !is.na(hg38_chm13.build_exclusive), tissue, NA)) %>% 
+  
+  # drop n_samples_expressed columns
+  # dplyr::select(-starts_with("n_samples_expressed")) %>% 
+  
+  # create diff_exp tissue placeholder columns to summarize on
+  mutate(hg19_hg38.is_diffquant = ifelse(abs(logFC_hg38_hg19) >= 1 & adj_pval_hg38_hg19 < 0.05, 1, 0)) %>% 
+  mutate(hg19_hg38.diffquant_tissue = ifelse(abs(logFC_hg38_hg19) >= 1 & adj_pval_hg38_hg19 < 0.05, tissue, NA)) %>% 
+  
+  mutate(hg38_chm13.is_diffquant = ifelse(abs(logFC_chm13_hg38) >= 1 & adj_pval_chm13_hg38 < 0.05, 1, 0)) %>% 
+  mutate(hg38_chm13.diffquant_tissue = ifelse(abs(logFC_chm13_hg38) >= 1 & adj_pval_chm13_hg38 < 0.05, tissue, NA)) %>% 
+    
+  # create diff in multimapping placeholder columns to summarize on
+  ## if difference in the proportion of multimapped reads is > 1%
+  mutate(hg19_hg38.diff_prop_multimap = ifelse(diff_mean_prop_multimapped.hg38_hg19 > 0.01, 1, 0)) %>% 
+  mutate(hg19_hg38.diff_prop_multimap_in_diffquant_tissue = ifelse(hg19_hg38.diff_prop_multimap == 1 & 
+                                                                     hg19_hg38.is_diffquant == 1,
+                                                                   tissue, NA)) %>% 
+  mutate(hg19_hg38.diff_prop_multimap_in_buildex_tissue = ifelse(hg19_hg38.diff_prop_multimap == 1 & 
+                                                                     hg19_hg38.build_exclusive == 1,
+                                                                   tissue, NA)) %>% 
+  
+  mutate(hg38_chm13.diff_prop_multimap = ifelse(diff_mean_prop_multimapped.chm13_hg38 > 0.01, 1, 0)) %>% 
+  mutate(hg38_chm13.diff_prop_multimap_in_diffquant_tissue = ifelse(hg38_chm13.diff_prop_multimap == 1 & 
+                                                                     hg38_chm13.is_diffquant == 1,
+                                                                   tissue, NA)) %>% 
+  mutate(hg38_chm13.diff_prop_multimap_in_buildex_tissue = ifelse(hg38_chm13.diff_prop_multimap == 1 & 
+                                                                     hg38_chm13.build_exclusive == 1,
+                                                                   tissue, NA)) %>% 
+  
+  # clean up feature Biotype labels
+  ## hg38 biotype > t2t > hg19
+  mutate(featBiotype = ifelse(!is.na(featBiotype.hg38), featBiotype.hg38,
+                              ifelse(!is.na(featBiotype.T2T), featBiotype.T2T, featBiotype.hg19))) %>% 
+  ## collapse groups
+  mutate(featBiotype_clean = ifelse(featBiotype == "protein_coding", "Protein Coding",
+       ifelse(featBiotype %in% c("lncRNA", "lincRNA"), "lncRNA",
+       ifelse(featBiotype %in% nonfunc_rna, "miscRNA / other ncRNA",
+       ifelse(str_detect(featBiotype, "pseudogene"), "Pseudogene",
+       ifelse(str_detect(featBiotype, "IG|TR"), "Ig/TCR Gene",
+       ifelse(featBiotype %in% func_rna, "Functional ncRNA",
+       ifelse(featBiotype == "TEC", "Unconfirmed (TEC)",
+       ifelse(featBiotype %in% t2t_spec, "Uncharacterized CHM13 Gene", featBiotype))))))))
+       ) %>% 
+  ## make ordered factor for plotting
+  mutate(featBiotype_clean = factor(featBiotype_clean, ordered=T,
+                              levels = c("Protein Coding", 
+                                         "lncRNA", 
+                                         "Ig/TCR Gene", 
+                                         "Functional ncRNA", 
+                                         "Pseudogene", 
+                                         "miscRNA / other ncRNA",
+                                         "Unconfirmed (TEC)",
+                                         "Uncharacterized CHM13 Gene"
+                                         )))
+
+```
+
+### main summarized
+
+```{r}
+# summarize results across all tissues
+main_table_summarized = main_table_cleaned %>% 
+  dplyr::select(-starts_with("n_samples_expressed"), -contains("_mapped_")) %>% 
+  group_by(across(c(-contains("tissue"), -starts_with("is_expressed_"), -starts_with("median_tpm_expressed"),
+                    -contains("build_exclusive"),
+                    -starts_with("diff_mean_prop_multimapped"), -contains("diff_prop_multimap"),
+                    -starts_with("logFC"), -starts_with("adj_pval"), -contains("diffquant"),
+                    -starts_with("outliers"), -starts_with("mean_abs_zdiff")
+                    ))) %>% 
+  summarise(
+            # tissues gene is expressed in
+            hg19.expressed_tissues = ifelse(all(is.na(hg19_expressed_tissue)), NA,
+                                               paste0(unique(na.omit(hg19_expressed_tissue)), collapse=", ")),
+            
+            hg38.expressed_tissues = ifelse(all(is.na(hg38_expressed_tissue)), NA,
+                                               paste0(unique(na.omit(hg38_expressed_tissue)), collapse=", ")),
+            
+            chm13.expressed_tissues = ifelse(all(is.na(chm13_expressed_tissue)), NA,
+                                               paste0(unique(na.omit(chm13_expressed_tissue)), collapse=", ")),
+            
+            # median expression across all tissues
+            hg19.median_tpm = median(median_tpm_expressed_hg19, na.rm=T),
+            hg38.median_tpm = median(median_tpm_expressed_hg38, na.rm=T),
+            chm13.median_tpm = median(median_tpm_expressed_chm13, na.rm=T),
+            
+            # build-exclusive expression events
+            is_build_exclusive = ifelse(any(!is.na(hg38_chm13.build_exclusive)) | 
+                                          any(!is.na(hg19_hg38.build_exclusive)), 1, 0), 
+            
+            hg19_hg38.build_exclusive = ifelse(all(is.na(hg19_hg38.build_exclusive)), NA,
+                                               paste0(unique(na.omit(hg19_hg38.build_exclusive)), collapse=", ")),
+            
+            hg38_chm13.build_exclusive = ifelse(all(is.na(hg38_chm13.build_exclusive)), NA,
+                                               paste0(unique(na.omit(hg38_chm13.build_exclusive)), collapse=", ")),
+            
+            
+            # differential quantification events
+            hg19_hg38.is_diffquant = ifelse(any(hg19_hg38.is_diffquant == 1), 1, 0),
+            
+            hg19_hg38.diffquant_tissues = ifelse(all(is.na(hg19_hg38.diffquant_tissue)), NA,
+                                               paste0(unique(na.omit(hg19_hg38.diffquant_tissue)), collapse=", ")),
+            
+            hg38_chm13.is_diffquant = ifelse(any(hg38_chm13.is_diffquant == 1), 1, 0),
+            
+            hg38_chm13.diffquant_tissues = ifelse(all(is.na(hg38_chm13.diffquant_tissue)), NA,
+                                               paste0(unique(na.omit(hg38_chm13.diffquant_tissue)), collapse=", ")),
+            
+            
+            # difference in multimapping rates
+            hg19_hg38.is_diffmulti = ifelse(any(hg19_hg38.diff_prop_multimap == 1), 1, 0),
+            
+            hg19_hg38.diffmulti_diffquant_tissues = ifelse(all(is.na(hg19_hg38.diff_prop_multimap_in_diffquant_tissue)), NA,
+                                               paste0(unique(na.omit(hg19_hg38.diff_prop_multimap_in_diffquant_tissue)), collapse=", ")),
+            
+            hg19_hg38.diffmulti_buildexclusive_tissues = ifelse(all(is.na(hg19_hg38.diff_prop_multimap_in_buildex_tissue)), NA,
+                                               paste0(unique(na.omit(hg19_hg38.diff_prop_multimap_in_buildex_tissue)), collapse=", ")),
+            
+            
+            hg38_chm13.is_diffmulti = ifelse(any(hg38_chm13.diff_prop_multimap == 1), 1, 0),
+            
+            hg38_chm13.diffmulti_diffquant_tissues = ifelse(all(is.na(hg38_chm13.diff_prop_multimap_in_diffquant_tissue)), NA,
+                                               paste0(unique(na.omit(hg38_chm13.diff_prop_multimap_in_diffquant_tissue)), collapse=", ")),
+            
+            hg38_chm13.diffmulti_buildexclusive_tissues = ifelse(all(is.na(hg38_chm13.diff_prop_multimap_in_buildex_tissue)), NA,
+                                               paste0(unique(na.omit(hg38_chm13.diff_prop_multimap_in_buildex_tissue)), collapse=", "))
+            
+            ) %>% 
+            
+  # annotation-specific expressed
+  mutate(is_annotation_specific_expressed = ifelse( (hg19_hg38.annotation_specific == "hg19" & !is.na(hg19.expressed_tissues)) |
+                                            ((hg19_hg38.annotation_specific == "hg38" | hg38_chm13.annotation_specific == "hg38") & 
+                                                     !is.na(hg38.expressed_tissues)) |  
+                                                   (hg38_chm13.annotation_specific == "chm13" & !is.na(chm13.expressed_tissues)), 1, 0)) %>% 
+  ungroup()
+
+
+
+names(main_table_summarized)
+
+```
+
+### add master annotations for quick stats
+
+```{r}
+# add build-dependent master annotations
+main_table_summarized = main_table_summarized %>% 
+  # dplyr::select(gene_id, ends_with("annotation_specific"), is_annotation_specific_expressed, 
+  #               ends_with("build_exclusive"), ends_with("is_diffquant")) %>% 
+  mutate(hg19_hg38.is_build_dep = ifelse( (!is.na(hg19_hg38.annotation_specific) & is_annotation_specific_expressed==1) |
+                                            !is.na(hg19_hg38.build_exclusive) |
+                                            hg19_hg38.is_diffquant == 1, 1, 0)) %>% 
+  mutate(hg38_chm13.is_build_dep = ifelse( (!is.na(hg38_chm13.annotation_specific) & is_annotation_specific_expressed==1) |
+                                            !is.na(hg38_chm13.build_exclusive) |
+                                            hg38_chm13.is_diffquant == 1, 1, 0)) %>% 
+  mutate(is_build_dep = ifelse(hg19_hg38.is_build_dep == 1 | hg38_chm13.is_build_dep == 1, 1, 0)) %>% 
+  # create summary columns for issues & blacklisting for annotation-specific gene figures
+  mutate(hg19_error_status = ifelse(!is.na(hg19_blacklist_reason),
+                                    ifelse(!is.na(hg19_issue), "Known issue + Blacklist Region", "Blacklist Region"),
+                                    ifelse(!is.na(hg19_issue), "Known issue", "No documented issue"))
+         ) %>% 
+  mutate(hg38_error_status = ifelse(!is.na(hg38_blacklist_reason),
+                                    ifelse(!is.na(hg38_issue), "Known issue + Blacklist Region", "Blacklist Region"),
+                                    ifelse(!is.na(hg38_issue), "Known issue", "No documented issue"))
+         ) %>% 
+  mutate(chm13_error_status = ifelse(!is.na(chm13_blacklist_reason),
+                                    ifelse(!is.na(chm13_issue), "Known issue + Blacklist Region", "Blacklist Region"),
+                                    ifelse(!is.na(chm13_issue), "Known issue", "No documented issue"))
+         )
+
+# get total build-dependent
+main_table_summarized %>% filter(is_build_dep==1) %>% pull(gene_id) %>% n_distinct()
+main_table_summarized %>% filter(is_build_dep==1 & featBiotype_clean == "Protein Coding") %>% filter() %>% pull(gene_id) %>% n_distinct()
+main_table_summarized %>% filter(is_build_dep==1 & is_omim_gene == 1) %>% filter() %>% pull(gene_id) %>% n_distinct()
+
+print("")
+main_table_summarized %>% filter(is_annotation_specific==1) %>% pull(gene_id) %>% n_distinct()
+main_table_summarized %>% filter(is_annotation_specific_expressed==1) %>% pull(gene_id) %>% n_distinct()
+main_table_summarized %>% filter(is_build_exclusive==1) %>% pull(gene_id) %>% n_distinct()
+main_table_summarized %>% filter(hg19_hg38.is_diffquant==1 | hg38_chm13.is_diffquant==1) %>% pull(gene_id) %>% n_distinct()
+
+print("")
+main_table_summarized %>% filter(hg19_hg38.is_build_dep==1) %>% pull(gene_id) %>% n_distinct()
+main_table_summarized %>% filter(hg38_chm13.is_build_dep==1) %>% pull(gene_id) %>% n_distinct()
+
+save_file = "/oak/stanford/groups/smontgom/shared/UDN/Analysis/ReferenceComparisonPrimary/all_genes_annotated_stupid_big.diffexp.mappingstats.outliers.updated.summary_per_gene.tsv"
+
+write_tsv(main_table_summarized, save_file)
+
+```
+
+## get build-dependent genes sub-table
+
+```{r}
+
+table_s1 = main_table_cleaned %>% 
+  mutate(hg19_hg38.is_build_dep = ifelse( (hg19_hg38.annotation_specific == "hg19" & 
+                                             !is.na(median_tpm_expressed_hg19)) |
+                                            (hg19_hg38.annotation_specific == "hg38" & 
+                                             !is.na(median_tpm_expressed_hg38)) |
+                                            !is.na(hg19_hg38.build_exclusive) |
+                                            hg19_hg38.is_diffquant == 1, 1, 0)) %>% 
+  mutate(hg38_chm13.is_build_dep = ifelse( (hg38_chm13.annotation_specific == "chm13" & 
+                                             !is.na(median_tpm_expressed_hg19)) |
+                                            (hg38_chm13.annotation_specific == "hg38" & 
+                                             !is.na(median_tpm_expressed_hg38)) |
+                                                !is.na(hg38_chm13.build_exclusive) |
+                                            hg38_chm13.is_diffquant == 1, 1, 0)) %>% 
+  mutate(is_build_dep = ifelse(hg19_hg38.is_build_dep == 1 | hg38_chm13.is_build_dep == 1, 1, 0)) %>% 
+  filter(is_build_dep == 1) %>% 
+  
+  # create cleaner hg38 vs chm13 build change column
+  mutate(build_change_chm13uniqregion = ifelse(
+    build_change_chm13uniqregion == 1 & !str_detect(build_change_chm13_hg38_medically_relevant_genes, "Nonsyntenic"), 
+           "Nonsyntenic_CHM13, novel_CHM13", NA)) %>%  
+  mutate(build_change_hg38_chm13 = paste0(na.omit(unique(c(build_change_chm13uniqregion, build_change_chm13_hg38_medically_relevant_genes))), collapse = ", ")) %>% 
+  dplyr::select(# gene ID info
+                gene_name, 
+                gene_id, 
+                gene_id_from, 
+                starts_with("gene_version"), 
+                featBiotype, 
+                
+                # disease relevance annotations
+                is_medically_relevant,
+                is_omim_gene, 
+                omim_pheno, 
+                is_opentargets_gene, 
+                top_opentargets_pheno, 
+                top_opentargets_score,
+                is_cancer_gene, 
+                cosmic_cancer_syndrome, 
+                is_clinvar_gene, 
+                clinvar_pheno,
+                
+                # blacklisted regions & reported issues
+                hg19_blacklist_reason, 
+                hg19_issue, 
+                hg38_blacklist_reason, 
+                hg38_issue, 
+                chm13_blacklist_reason, 
+                chm13_issue,
+                
+                # build change notations
+                build_change_hg19_hg38 = build_change_h38_hg19,
+                build_change_hg38_chm13,
+                
+                # Expression info
+                tissue,
+                hg19_n_samples_expressed = n_samples_expressed_hg19, 
+                hg19_median_tpm_expressed = median_tpm_expressed_hg19, 
+                hg19_prop_mean_multimapped = prop_mean_multimapped_hg19,
+                
+                hg38_n_samples_expressed = n_samples_expressed_hg38, 
+                hg38_median_tpm_expressed = median_tpm_expressed_hg38, 
+                hg38_prop_mean_multimapped = prop_mean_multimapped_hg38,
+                
+                chm13_n_samples_expressed = n_samples_expressed_chm13, 
+                chm13_median_tpm_expressed = median_tpm_expressed_chm13, 
+                chm13_prop_mean_multimapped = prop_mean_multimapped_chm13,
+                
+                # hg19 vs hg38 
+                ## annotation comparison
+                hg19_hg38_is_annotation_specific = hg19_hg38.annotation_specific, 
+                hg19_hg38_annotation_comparison, 
+                hg19_hg38_gene_model_comparison, 
+                hg38_hg19_gene_similarity,
+                ## differential quantification
+                hg19_hg38_is_diffquant = hg19_hg38.is_diffquant, 
+                hg38_hg19_logFC = logFC_hg38_hg19, 
+                hg38_hg19_adj_pval = adj_pval_hg38_hg19,
+                ## build-exclusive expression
+                hg19_hg38_is_build_exclusive = hg19_hg38.build_exclusive,
+                
+                # hg38 vs chm13
+                ## annotation comparison
+                hg38_chm13_is_annotation_specific = hg38_chm13.annotation_specific, 
+                hg38_chm13_annotation_comparison, 
+                hg38_chm13_gene_model_comparison, 
+                hg38_chm13_gene_similarity = chm13_hg38_gene_similarity,
+                ## differential quantification
+                hg38_chm13_is_diffquant = hg38_chm13.is_diffquant, 
+                hg38_chm13_logFC = logFC_chm13_hg38, 
+                hg38_chm13_adj_pval = adj_pval_chm13_hg38,
+                ## build-exclusive expression
+                hg38_chm13_is_build_exclusive_to = hg38_chm13.build_exclusive
+                
+                ) %>% 
+  mutate(is_medically_relevant = ifelse(is.na(is_medically_relevant), 0, 1),
+         is_omim_gene = ifelse(is.na(is_omim_gene), 0, 1),
+         is_clinvar_gene = ifelse(is.na(is_clinvar_gene), 0, 1)) %>% 
+  # clean up the wonky PAR gene similarities
+  mutate(hg38_hg19_gene_similarity = ifelse(hg38_hg19_gene_similarity == 0.5, NA, hg38_hg19_gene_similarity))
+
+# remove wayward spaces after commas
+table_s1 <- data.frame(lapply(table_s1, function(x) {gsub(", ", ",", x)}))
+table_s1 <- data.frame(lapply(table_s1, function(x) {gsub(" ", "_", x)}))
+
+write_tsv(table_s1, "/oak/stanford/groups/smontgom/shared/UDN/Analysis/ReferenceComparisonPrimary/supplementary_table1_build_dep_gene_annotations.tsv")
+
+```
+
+# Stats
+
+## Gene Model
+
+```{r}
+
+main_table_summarized %>% 
+  group_by(hg19_hg38_annotation_comparison) %>% 
+  summarise(n_genes = n_distinct(na.omit(gene_id)))
+
+main_table_summarized %>% 
+  filter(hg19_hg38_annotation_comparison == "1_to_1") %>% 
+  group_by(hg19_hg38_gene_model_comparison) %>% 
+  summarise(n_genes = n_distinct(na.omit(gene_id)))
+
+
+
+main_table_summarized %>% 
+  group_by(hg38_chm13_annotation_comparison) %>% 
+  summarise(n_genes = n_distinct(na.omit(gene_id)))
+
+main_table_summarized %>% 
+  filter(hg38_chm13_annotation_comparison == "chm13_specific") %>% 
+  group_by(build_change_chm13uniqregion) %>% 
+  summarise(n_chm13_spec = n_distinct(na.omit(gene_id)))
+
+main_table_summarized %>% 
+  filter(hg38_chm13_annotation_comparison == "1_to_1") %>% 
+  group_by(hg38_chm13_gene_model_comparison) %>% 
+  summarise(n_genes = n_distinct(na.omit(gene_id)))
+
+```
+
+## Sequence Similarity
+
+### hg19:hg38
+
+```{r}
+library(rstatix)
+
+main_table_cleaned %>% 
+  filter(hg19_hg38_gene_model_comparison == "identical gene model" & 
+           !is.na(hg38_hg19_gene_similarity)) %>% 
+  pull(gene_id) %>% 
+  na.omit() %>%  
+  n_distinct()
+
+main_table_cleaned %>% 
+  filter(hg19_hg38_gene_model_comparison == "identical gene model" & 
+           !is.na(hg38_hg19_gene_similarity)) %>%
+  dplyr::select(gene_id, hg38_hg19_gene_similarity) %>% 
+  distinct() %>% 
+  # pull() %>% 
+  get_summary_stats(hg38_hg19_gene_similarity)
+
+
+main_table_cleaned %>% pull(hg38_hg19_gene_similarity) %>% max(na.rm=T) # 0.9999999
+min = main_table_cleaned %>% pull(hg38_hg19_gene_similarity) %>% min(na.rm=T) # 0.9999999
+
+main_table_cleaned %>% filter(hg38_hg19_gene_similarity == min) %>% dplyr::select(gene_id, gene_name, hg38_hg19_gene_similarity) %>% distinct()
+
+```
+
+
+### hg38:chm13
+
+```{r}
+library(rstatix)
+
+main_table_cleaned %>% 
+  filter(hg38_chm13_gene_model_comparison == "identical gene model" & 
+           !is.na(chm13_hg38_gene_similarity)) %>% 
+  pull(gene_id) %>% 
+  na.omit() %>%  
+  n_distinct()
+
+main_table_cleaned %>% 
+  filter(hg38_chm13_gene_model_comparison == "identical gene model" & 
+           !is.na(chm13_hg38_gene_similarity)) %>%
+  dplyr::select(gene_id, chm13_hg38_gene_similarity) %>% 
+  distinct() %>% 
+  # pull() %>% 
+  get_summary_stats(chm13_hg38_gene_similarity)
+
+
+main_table_cleaned %>% pull(chm13_hg38_gene_similarity) %>% max(na.rm=T) # 0.9999999
+min = main_table_cleaned %>% pull(chm13_hg38_gene_similarity) %>% min(na.rm=T) # 0.9999999
+
+main_table_cleaned %>% filter(chm13_hg38_gene_similarity < 0.9) %>% dplyr::select(gene_id, gene_name, chm13_hg38_gene_similarity) %>% distinct()
+
+```
+
+
+## Table: Diff Quantified by Tissue
+
+```{r}
+
+main_table_cleaned %>% 
+  # add union row
+  rbind(main_table_cleaned %>% mutate(tissue = "Union")) %>% 
+  # Filter to diff quant genes
+  filter(hg19_hg38.is_diffquant==1 | hg38_chm13.is_diffquant == 1) %>% 
+  # summarize per tissue
+  group_by(tissue) %>% 
+  summarize(`Total hg19:hg38\nDifferentially Quantified` = n_distinct(gene_id[hg19_hg38.is_diffquant==1], na.rm=T),
+            `Total hg38:chm13\nDifferentially Quantified` = n_distinct(gene_id[hg38_chm13.is_diffquant==1], na.rm=T))
+
+```
+
+## Build-exclusive
+
+```{r}
+
+main_table_summarized %>% 
+  rbind(main_table_summarized %>% 
+          mutate(hg19_hg38.build_exclusive = ifelse(is.na(hg19_hg38.build_exclusive), NA, "Union"))
+  ) %>% 
+  filter(is_build_exclusive == 1) %>% 
+  group_by(hg19_hg38.build_exclusive) %>% 
+  summarize(n_genes = n_distinct(na.omit(gene_id)))
+
+
+main_table_summarized %>% 
+  rbind(main_table_summarized %>% 
+          mutate(hg38_chm13.build_exclusive = ifelse(is.na(hg38_chm13.build_exclusive), NA, "Union"))
+  ) %>% 
+  filter(is_build_exclusive == 1) %>% 
+  group_by(hg38_chm13.build_exclusive) %>% 
+  summarize(n_genes = n_distinct(na.omit(gene_id)))
+
+
+```
+
+# Figures
+
+## Overview Barplots
+
+### Grouped by comparison
+
+```{r fig.height=4, fig.width=4}
+
+# plot number of build-dependent events per comparison
+main_table_summarized %>% 
+  filter(hg19_hg38.is_build_dep==1) %>% 
+  gather(key = "event", value = "value", hg19_hg38.annotation_specific, hg19_hg38.build_exclusive, hg19_hg38.is_diffquant) %>% 
+  mutate(event = ifelse(!is.na(value) & value != 0, str_replace(event, "\\.", "\n"), NA)) %>% 
+  filter(!is.na(event)) %>% 
+  group_by(event) %>% 
+  summarize(n = n_distinct(gene_id)) %>% 
+  ggplot(aes(x = event, y = n)) + geom_col(fill="#d07c10") + theme_bw(base_size = 14)
+
+
+main_table_summarized %>% 
+  filter(hg38_chm13.is_build_dep==1) %>% 
+  gather(key = "event", value = "value", hg38_chm13.annotation_specific, hg38_chm13.build_exclusive, hg38_chm13.is_diffquant) %>% 
+  mutate(event = ifelse(!is.na(value) & value != 0, str_replace(event, "\\.", "\n"), NA)) %>% 
+  filter(!is.na(event)) %>% 
+  group_by(event) %>% 
+  summarize(n = n_distinct(gene_id)) %>% 
+  ggplot(aes(x = event, y = n)) + geom_col(fill="#006B2F") + theme_bw(base_size = 14)
+
+```
+
+### Grouped by event
+
+```{r fig.height=1.5, fig.width=4}
+# event labels
+event_labels = c("Annotation\nSpecific", "Differentially\nQuantified", "Build\nExclusive")
+names(event_labels) = c("annotation_specific", "is_diffquant", "build_exclusive")
+
+# plot number of build-dependent events per comparison
+for_overview_plot = main_table_summarized %>% 
+  filter(hg19_hg38.is_build_dep==1 | hg38_chm13.is_build_dep==1) %>% 
+  gather(key = "event", value = "value", ends_with(".annotation_specific"), ends_with(".build_exclusive"), ends_with(".is_diffquant")) %>% 
+  dplyr::select(-is_annotation_specific_expressed, -ends_with("is_build_dep"), -contains("annotation_specific"), -is_build_exclusive) %>% 
+  mutate(event = ifelse(!is.na(value) & value != 0, event, NA)) %>% 
+  filter(!is.na(event)) %>% 
+  separate(event, into = c("comparison", "event"), sep = "\\.") %>%
+  mutate(comparison = str_replace(comparison, "_", " vs ")) %>% 
+  group_by(event, comparison) %>% 
+  # mutate(event = event_labels[event]) %>% 
+  mutate(event = factor(event_labels[event], levels = event_labels, ordered = T)) %>% 
+  summarize(n = n_distinct(gene_id))
+
+x = for_overview_plot %>% 
+  ggplot(aes(x = event, y = n, fill = comparison)) + 
+    geom_col(position = "dodge") +
+    geom_text(aes(label = n), 
+              position = position_dodge(width = .9), 
+              size = 5,
+              vjust = -0.5) + 
+    scale_fill_manual(values = c("#d07c10", "#006B2F")) +
+    scale_y_continuous(name = "# Distinct Genes", limits = c(0,1400)) +
+    theme_bw(base_size = 16) +
+    theme(axis.title.x = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.grid.major.x = element_blank(),
+          legend.position = c(0.15,0.85),
+          legend.background = element_rect(fill = "transparent"))
+
+x
+
+x + facet_wrap( ~ event, scales = "free_x") + 
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        legend.position = "bottom")
+
+```
+
+## Annotation Comparison
+
+### Sankey Plots
+
+#### hg19:hg38
+
+```{r fig.height=4, fig.width=8.5}
+#remotes::install_github("davidsjoberg/ggsankey")
+library(ggsankey)
+
+nodes = c("Mutually Annotated", "Identical gene model", "Different exon lengths", 
+                  "Different number of exons", "Different number of transcripts",
+                  "hg19-specific", "hg38-specific")
+names(nodes) = c("1_to_1", "identical gene model", "exon_length_diff", 
+                         "exon_count_diff","transcript_count_diff","hg19_specific","hg38_specific")
+
+# prepare data
+df = main_table_summarized %>% 
+  filter(!is.na(hg19_hg38_annotation_comparison) & gene_id_from %in% c("gene_id_hg19", "gene_id_hg38")) %>% 
+  dplyr::select(gene_id, hg19_hg38_annotation_comparison, hg19_hg38_gene_model_comparison) %>% 
+  mutate(hg19 = ifelse(hg19_hg38_annotation_comparison == "hg19_specific", 
+                              "hg19_specific", hg19_hg38_gene_model_comparison)) %>% 
+  mutate(hg38 = ifelse(hg19_hg38_annotation_comparison == "hg19_specific", NA, hg19_hg38_annotation_comparison)) %>% 
+  make_long(hg19, hg38) %>% 
+  filter(!is.na(node))
+
+df = df %>% 
+  mutate(node = factor(node, levels = names(nodes), ordered=T)) %>% 
+  mutate(next_node = factor(next_node, levels = names(nodes), ordered=T))
+
+# calculate totals
+dagg <- df %>%
+  dplyr::group_by(node) %>%
+  tally()
+
+# combine data
+df2 <- merge(df, dagg, by.x = 'node', by.y = 'node', all.x = TRUE)
+
+hg19hg38 = ggplot(df2, aes(x = x, 
+               next_x = next_x, 
+               node = node, 
+               next_node = next_node,
+               fill = factor(x),
+               label = paste0(nodes[node]," (", scales::comma(n), ")"))) +
+  geom_sankey(flow.alpha = 0.5,
+              flow.fill = "#d07c10",
+              flow.color = 'black',
+              width = 0.1,
+              na.rm	= T,
+              node.color = "black",
+              show.legend = FALSE) +
+    geom_sankey_label(size = 3.5, color = "black", fill= "white", hjust = 1.18) +
+    scale_fill_manual(values = c("#8C1515", "#dea700")) +
+    # scale_y_continuous(trans = "log10") +
+    theme_sankey(base_size = 16) +
+    theme(axis.title.x = element_blank(),
+          plot.margin = unit(c(1,-5,1,5), "cm"))
+
+hg19hg38
+
+ggsave(plot = hg19hg38, filename = "hg19_hg38_annotation_comparison_sankey.svg", dpi = 500)
+
+```
+
+#### hg38:chm13
+
+```{r fig.height=4, fig.width=8.5}
+
+nodes = c("Mutually Annotated", "Identical gene model", "Different exon lengths", 
+                  "Different number of exons", "Different number of transcripts",
+                  "chm13-specific", "hg38-specific")
+names(nodes) = c("1_to_1", "identical gene model", "exon_length_diff", 
+                         "exon_count_diff","transcript_count_diff","chm13_specific","hg38_specific")
+
+# prepare data
+df = main_table_summarized %>% 
+  filter(!is.na(hg38_chm13_annotation_comparison) & gene_id_from %in% c("gene_id_chm13", "gene_id_hg38")) %>% 
+  dplyr::select(gene_id, hg38_chm13_annotation_comparison, hg38_chm13_gene_model_comparison) %>% 
+  mutate(chm13 = ifelse(hg38_chm13_annotation_comparison == "chm13_specific", 
+                              "chm13_specific", hg38_chm13_gene_model_comparison)) %>% 
+  mutate(hg38 = ifelse(hg38_chm13_annotation_comparison == "chm13_specific", NA, hg38_chm13_annotation_comparison)) %>% 
+  make_long(hg38, chm13) %>% 
+  filter(!is.na(node))
+
+df = df %>% 
+  mutate(node = factor(node, levels = names(nodes), ordered=T)) %>% 
+  mutate(next_node = factor(next_node, levels = names(nodes), ordered=T))
+
+# calculate totals
+dagg <- df %>%
+  dplyr::group_by(node) %>%
+  tally()
+
+# combine data
+df2 <- merge(df, dagg, by.x = 'node', by.y = 'node', all.x = TRUE)
+
+hg38chm13 = ggplot(df2, aes(x = x, 
+               next_x = next_x, 
+               node = node, 
+               next_node = next_node,
+               fill = factor(x),
+               label = paste0(nodes[node]," (", scales::comma(n), ")"))) +
+  geom_sankey(flow.alpha = 0.5,
+              flow.fill = "#006B2F",
+              flow.color = 'black',
+              width = 0.1,
+              na.rm	= T,
+              node.color = "black",
+              show.legend = FALSE) +
+    geom_sankey_label(size = 3.5, color = "black", fill= "white", hjust = -0.2) +
+    scale_fill_manual(values = c("#dea700", "#01427a")) +
+    # scale_y_continuous(trans = "log10") +
+    theme_sankey(base_size = 16) +
+    theme(axis.title.x = element_blank(),
+          plot.margin = unit(c(1,7,1,-5), "cm"))
+
+hg38chm13 + theme(plot.margin = unit(c(1,1,1,-5), "cm"))
+
+ggsave(plot = hg38chm13, filename = "hg38_chm13_annotation_comparison_sankey.svg", dpi = 500)
+
+
+```
+
+#### plot together
+
+```{r fig.height=4, fig.width=17}
+
+library(ggpubr)
+ggarrange(hg19hg38 + theme(plot.margin = unit(c(1,-5,1,0), "cm")), hg38chm13 + theme(plot.margin = unit(c(1,0,1,-5), "cm")), nrow = 1)
+
+```
+
+
+### Jaro-winkler Hist
+
+- change t2t to chm13
+- change x label to something more sensical
+- larger axes sizes
+- i think also actually on a non log scale would be good to emphasize the consistency?
+- drop par genes
+
+```{r fig.height=4, fig.width=5}
+
+main_table_cleaned %>% 
+  filter( hg19_hg38_gene_model_comparison == "identical gene model" & 
+           !is.na(hg38_hg19_gene_similarity)
+          ) %>%
+  dplyr::select(gene_id, hg38_hg19_gene_similarity) %>% 
+  filter(hg38_hg19_gene_similarity != 0.5) %>% 
+  ggplot(aes(x = hg38_hg19_gene_similarity)) +
+    geom_histogram() +
+    theme_bw(base_size = 18) +
+    scale_x_continuous(name = "Jaro Winkler Similarity Score") +
+    scale_y_continuous(name = "# Genes") +
+    theme(panel.grid.minor = element_blank())
+
+
+main_table_cleaned %>% 
+  filter( hg38_chm13_gene_model_comparison == "identical gene model" & 
+           !is.na(chm13_hg38_gene_similarity)
+          ) %>%
+  dplyr::select(gene_id, chm13_hg38_gene_similarity) %>% 
+  filter(chm13_hg38_gene_similarity != 0.5) %>% 
+  ggplot(aes(x = chm13_hg38_gene_similarity)) +
+    geom_histogram() +
+    theme_bw(base_size = 18) +
+    scale_x_continuous(name = "Jaro Winkler Similarity Score") +
+    scale_y_continuous(name = "# Genes") +
+    theme(panel.grid.minor = element_blank())
+
+main_table_cleaned %>% 
+  filter( (hg38_chm13_gene_model_comparison == "identical gene model" & 
+           !is.na(chm13_hg38_gene_similarity)) |
+            (hg19_hg38_gene_model_comparison == "identical gene model" & 
+           !is.na(hg38_hg19_gene_similarity))
+          ) %>%
+  dplyr::select(gene_id, chm13_hg38_gene_similarity, hg38_hg19_gene_similarity) %>% 
+  gather(key = "key", value = "gene_similarity", -gene_id) %>% 
+  mutate(comparison = ifelse(str_detect(key, "hg19"), "hg19:hg38", ifelse(str_detect(key, "chm13"), "hg38:chm13", NA))) %>% 
+  filter(gene_similarity != 0.5) %>% 
+  group_by(comparison) %>% 
+  summarize(n_genes = n_distinct(na.omit(gene_id)))
+
+```
+
+## Annotation Specific
+
+```{r}
+
+for_annot_spec_plots = main_table_summarized  %>% 
+  # preselect annotation-specific genes and needed columns
+  filter(!is.na(hg19_hg38.annotation_specific) | !is.na(hg38_chm13.annotation_specific)) %>% 
+  dplyr::select(ends_with(".annotation_specific"), featBiotype_clean, ends_with("_error_status"), gene_id, ends_with("expressed_tissues")) %>% 
+  # extract comparison and build info
+  gather(key = "comparison", value = "build", hg19_hg38.annotation_specific, hg38_chm13.annotation_specific) %>% 
+  mutate(comparison = comparison %>% str_remove("\\.annotation_specific") %>% str_replace("_",":")) %>% 
+  mutate(build = factor(build, ordered=T, levels=c("hg19", "hg38", "chm13"))) %>% 
+  # extract expression info per build
+  gather(key = "build_exp", value = "expressed_tissues", ends_with("expressed_tissues")) %>% 
+  mutate(build_exp = build_exp %>% str_remove("\\.expressed_tissues")) %>% 
+  # filter to build-specific genes expressed in their respective build
+  filter(!is.na(build)) %>% 
+  filter(build == build_exp & !is.na(expressed_tissues)) %>% 
+  # create error-status column for the appropriate build
+  mutate(error_status = ifelse(build_exp=="hg19", hg19_error_status,
+                               ifelse(build_exp=="hg38", hg38_error_status,
+                                      ifelse(build_exp=="chm13", chm13_error_status, NA))))
+  # dplyr::select(-ends_with("_error_status"))
+
+```
+
+### Issues
+
+```{r fig.height=8, fig.width=9.12}
+
+annot_issues_stackedbar = for_annot_spec_plots %>% 
+  group_by(comparison, build, error_status) %>% 
+  summarize(n = n_distinct(gene_id)) %>% 
+  ungroup() %>% 
+  ggplot(aes(x = build, y = n, fill = error_status)) +
+    geom_col(position = "fill", color = "white") +
+    scale_y_continuous(name = "Proportion of expressed\nannotation-specific genes") +
+    facet_wrap(~comparison, scales = "free_x") +
+    theme_bw(base_size=18) +
+    theme(axis.title.x = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.grid.major.x = element_blank(),
+          legend.position = "bottom",
+          panel.background = element_rect(fill='transparent'), #transparent panel bg
+          plot.background = element_rect(fill='transparent', color=NA), #transparent plot bg
+          )
+
+annot_issues_stackedbar +
+  scale_fill_manual(values = c("grey75", "grey50", "grey25", "darkslategray3"),
+                      name = "") +
+  guides(fill=guide_legend(ncol=2)) +
+  theme_bw(base_size=30) +
+  theme(strip.background =element_rect(fill="transparent"),
+        legend.justification = c(0.9,0)) +
+  theme(legend.position = "bottom")
+
+```
+
+#### table summary
+
+```{r}
+
+main_table_summarized %>% filter(hg38_chm13.annotation_specific=="chm13" & is_annotation_specific_expressed==1) %>% group_by(chm13_error_status) %>% summarize(n = n_distinct(gene_id))
+
+for_annot_spec_plots %>% filter(build_exp=="hg38" & comparison == "hg19:hg38") %>% group_by(error_status) %>% summarize(n = n_distinct(gene_id))
+
+for_annot_spec_plots %>% 
+  rbind(for_annot_spec_plots %>% mutate(error_status = "total")) %>% 
+  group_by(comparison, build, error_status) %>% 
+  summarize(n = n_distinct(na.omit(gene_id))) %>% 
+  unite(k, comparison, build, sep="\n") %>% 
+  spread(key = k, value = n)
+
+```
+
+### Biotypes
+
+```{r}
+
+for_annot_spec_plots %>%
+  group_by(comparison, build) %>% 
+  summarize(n = n_distinct(gene_id))
+  
+# check numbers
+# comparison  build  n_distinct(gene_id)
+# hg19:hg38   hg19   169
+# hg19:hg38   hg38   14
+# hg38:chm13  hg38   68
+# hg38:chm13  chm13  335
+
+
+hg38_annot_spec = for_annot_spec_plots %>% filter(build=="hg38") %>% pull(gene_id) %>% unique()
+main_table_summarized %>% filter(gene_id %in% hg38_annot_spec) %>% 
+  filter(is_omim_gene==1 | is_opentargets_gene==1 | is_cancer_gene==1 | is_clinvar_gene==1)
+rm(hg38_annot_spec)
+
+annot_biotypes_stackedbar = for_annot_spec_plots %>% 
+  group_by(comparison, build, featBiotype_clean) %>% 
+  summarize(n = n_distinct(gene_id)) %>% 
+  ungroup() %>% 
+  ggplot(aes(x = build, y = n, fill = featBiotype_clean)) +
+    geom_col(position = "fill", color = "white") +
+    scale_y_continuous(name = "Proportion of expressed\nannotation-specific genes") +
+    facet_wrap(~comparison, scales = "free_x") +
+    theme_bw(base_size=18) +
+    theme(axis.title.x = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.grid.major.x = element_blank(),
+          legend.position = "bottom",
+          panel.background = element_rect(fill='transparent'), #transparent panel bg
+          plot.background = element_rect(fill='transparent', color=NA), #transparent plot bg
+          )
+
+```
+
+#### barbie-themed
+
+```{r fig.height=9.95, fig.width=9.12}
+
+annot_biotypes_stackedbar +
+  scale_fill_manual(values = c("#e0338b", "#f4acca", "#f1f135", "#5aba90", 
+                                 "#71f0e9", "#01c8cf", "#229abf", "#c475c4"),
+                      name = "") +
+  guides(fill=guide_legend(ncol=2)) +
+  theme_bw(base_size=30) +
+  theme(strip.background =element_rect(fill="transparent"),
+        legend.justification = c(0.9,0)) +
+  theme(legend.position = "bottom")
+
+```
+
+#### table summary
+
+```{r}
+
+for_annot_spec_plots %>% 
+  rbind(for_annot_spec_plots %>% mutate(featBiotype_clean = "total")) %>% 
+  group_by(comparison, build, featBiotype_clean) %>% 
+  summarize(n = n_distinct(na.omit(gene_id))) %>% 
+  unite(k, comparison, build, sep="\n") %>% 
+  spread(key = k, value = n)
+
+```
+
+### SIK1 / SIK1B reads
+
+```{r fig.height=5, fig.width=5}
+
+sik1_reads <- fread("/oak/stanford/groups/smontgom/shared/UDN/Analysis/ReferenceComparisonPrimary/SIK1_SIK1B_Multimapping/all_star_Aligned.toTranscriptome.sorted.SIK1_SIK1B_reads_combined_annotated_summarized.tsv") %>% 
+  mutate(hg38 = ifelse(is.na(hg38), "Dropped during alignment", hg38),
+         chm13 = ifelse(is.na(chm13), "Dropped during alignment", chm13)) %>% 
+  mutate(hg38 = ifelse(str_detect(hg38, "Multimapped within"), "Multimapped within gene", hg38),
+         chm13 = ifelse(str_detect(chm13, "Multimapped within"), "Multimapped within gene", chm13)) %>% 
+  filter(hg38 %in% c("SIK1", "SIK1B") | chm13 %in% c("SIK1", "SIK1B"))
+
+# get some stats
+total_reads = sik1_reads %>% mutate(hg38="TOTAL", chm13="--") %>% pull(readID) %>% n_distinct()
+
+sik1_stats = sik1_reads %>% 
+    group_by(hg38, chm13) %>%
+    summarize(n = n_distinct(readID)) %>% 
+    mutate(percent = signif(n / total_reads, 3))
+
+# prep data for plot
+sik1_reads_prepped = sik1_reads %>% 
+  make_long(hg38, chm13) %>% 
+  filter(!is.na(node))
+
+# calculate totals
+dagg <- sik1_reads_prepped %>%
+  dplyr::group_by(node) %>%
+  tally()
+
+# combine data
+sik1_reads_toplot <- merge(sik1_reads_prepped, dagg, by.x = 'node', by.y = 'node', all.x = TRUE)
+
+
+sik1_sankey = ggplot(sik1_reads_toplot, aes(x = x, 
+               next_x = next_x, 
+               node = node, 
+               next_node = next_node,
+               fill = factor(node),
+               label = node # paste0(node, " (", filter(sik1_stats, hg38==node & chm13==next_node) %>% pull(percent) %>% scales::percent(), ")" )
+               )) +
+  geom_sankey(flow.alpha = 0.5,
+              flow.color = 'black',
+              width = 0.1,
+              na.rm	= T,
+              node.color = "black",
+              show.legend = FALSE) +
+  # geom_sankey_label(size = 3.5, color = "black", fill= "white", hjust = 0) +
+  scale_fill_manual(values = rev(c("seashell4", "seashell3", rep("palevioletred1", 2), "gray15"))) +
+  scale_y_continuous(trans = "log10") +
+  theme_sankey(base_size = 30) +
+  theme(axis.title.x = element_blank(),
+        # plot.margin = unit(c(1,-5,1,5), "cm")
+        )
+
+sik1_sankey
+sik1_stats %>% mutate(percent = percent*100)
+sik1_reads %>% 
+    group_by(hg38) %>%
+    summarize(n = n_distinct(readID)) %>% 
+    mutate(percent = signif(n / total_reads, 3)*100)
+
+```
+
+```{r}
+# clean up
+rm(sik1_reads, sik1_reads_prepped, sik1_reads_toplot, sik1_stats, dagg)
+```
+
+## Differentially Quantified
+
+see `diff_quant_figures.Rmd` script
+
+## Build-Exclusive: 
+
+### TPM levels
+
+```{r fig.height=7, fig.width=9.5}
+
+for_tpm_plot = main_table_summarized %>% 
+  filter(!is.na(hg19_hg38.build_exclusive) | !is.na(hg38_chm13.build_exclusive)) %>% 
+  dplyr::select(gene_id, 
+                `hg19:hg38` = hg19_hg38.build_exclusive, 
+                `hg38:chm13` = hg38_chm13.build_exclusive, 
+                hg19 = hg19.median_tpm,
+                hg38 = hg38.median_tpm,
+                chm13 = chm13.median_tpm) %>% 
+  gather(key = "comparison", value = "buildexcl_build", `hg19:hg38`, `hg38:chm13`) %>% 
+  gather(key = "tpm_build", value = "median_tpm", hg19, hg38, chm13) %>% 
+  filter(tpm_build == buildexcl_build) %>% 
+  mutate(build = factor(tpm_build, levels = c("hg19", "hg38", "chm13"), ordered=T))
+```
+
+generate plot with barbie-themed color palette
+
+```{r}
+for_tpm_plot %>% ggplot(aes(x = build, y = median_tpm, fill = build)) + 
+  geom_violin(trim=T) + 
+  scale_fill_manual(values = c("#df338b", "#fcf123", "#2cb3da")) +
+  facet_wrap(~ comparison, scales = "free_x") +
+  scale_y_continuous(trans="log10", name = "Median TPM\nacross all tissues") +
+  theme_bw(base_size=30) +
+  theme(axis.title.x = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.background =element_rect(fill="transparent"),
+        legend.position = "none")
+  
+
+```
+
+## Reasons for build-dependent events
+
+### data prep
+```{r}
+
+names(main_table_summarized)
+
+hg19_hg38_reasons_toplot = main_table_summarized  %>% 
+  filter(!is.na(hg19_hg38.build_exclusive) | 
+           !is.na(hg19_hg38.annotation_specific) | 
+           hg19_hg38.is_diffquant==1) %>% 
+  mutate(build_dep_event = ifelse(!is.na(hg19_hg38.annotation_specific), "annotation-specific",
+                                  ifelse(hg19_hg38.is_diffquant==1, "differentially quantified",
+                                         ifelse(!is.na(hg19_hg38.build_exclusive), "build-exclusive", NA)))) %>% 
+  filter(!is.na(hg19.expressed_tissues) | !is.na(hg38.expressed_tissues)) %>% 
+  mutate(gene_model_change = ifelse(is.na(hg19_hg38_gene_model_comparison) | hg19_hg38_gene_model_comparison == "identical", 0, 1),
+         hg19_issue_or_blacklist = ifelse(!is.na(hg19_blacklist_reason) | !is.na(hg19_issue), 1, 0),
+         hg38_issue_or_blacklist = ifelse(!is.na(hg38_blacklist_reason) | !is.na(hg38_issue), 1, 0),
+         build_change = ifelse(!is.na(build_change_h38_hg19), 1, 0),
+         multimapping_difference = ifelse(!is.na(hg19_hg38.diffmulti_diffquant_tissues) | !is.na(hg19_hg38.diffmulti_buildexclusive_tissues), 1, 0)) %>% 
+  mutate(error_status = ifelse(hg19_issue_or_blacklist==1 & hg38_issue_or_blacklist==0, "Resolved",
+                                         ifelse(hg19_issue_or_blacklist==1 & hg38_issue_or_blacklist==1, "Persistent",
+                                                ifelse(hg19_issue_or_blacklist==1 & hg38_issue_or_blacklist==0, "Newly identified", NA)))) %>% 
+  mutate(error_status = ifelse(!is.na(error_status), 1, 0)) %>% 
+  dplyr::select(gene_id, hg19_hg38.annotation_specific, 
+                hg19_hg38.build_exclusive, 
+                hg19_hg38.is_diffquant, 
+                build_dep_event, 
+                error_status, 
+                gene_model_change,
+                build_change,
+                multimapping_difference)
+
+
+hg38_chm13_reasons_toplot = main_table_summarized  %>% 
+  filter(!is.na(hg38_chm13.build_exclusive) | 
+           !is.na(hg38_chm13.annotation_specific) | 
+           hg38_chm13.is_diffquant==1) %>% 
+  mutate(build_dep_event = ifelse(!is.na(hg38_chm13.annotation_specific), "annotation-specific",
+                                  ifelse(hg38_chm13.is_diffquant==1, "differentially quantified",
+                                         ifelse(!is.na(hg38_chm13.build_exclusive), "build-exclusive", NA)))) %>% 
+  filter(!is.na(hg19.expressed_tissues) | !is.na(hg38.expressed_tissues)) %>% 
+  mutate(gene_model_change = ifelse(is.na(hg38_chm13_gene_model_comparison) | hg38_chm13_gene_model_comparison == "identical", 0, 1),
+         hg19_issue_or_blacklist = ifelse(!is.na(hg19_blacklist_reason) | !is.na(hg19_issue), 1, 0),
+         hg38_issue_or_blacklist = ifelse(!is.na(hg38_blacklist_reason) | !is.na(hg38_issue), 1, 0),
+         build_change = ifelse(!is.na(build_change_h38_hg19), 1, 0),
+         multimapping_difference = ifelse(!is.na(hg38_chm13.diffmulti_diffquant_tissues) | !is.na(hg38_chm13.diffmulti_buildexclusive_tissues), 1, 0)) %>% 
+  mutate(error_status = ifelse(hg19_issue_or_blacklist==1 & hg38_issue_or_blacklist==0, "Resolved",
+                                         ifelse(hg19_issue_or_blacklist==1 & hg38_issue_or_blacklist==1, "Persistent",
+                                                ifelse(hg19_issue_or_blacklist==1 & hg38_issue_or_blacklist==0, "Newly identified", NA)))) %>% 
+  mutate(error_status = ifelse(!is.na(error_status), 1, 0)) %>% 
+  dplyr::select(gene_id, hg38_chm13.annotation_specific, 
+                hg38_chm13.build_exclusive, 
+                hg38_chm13.is_diffquant, 
+                build_dep_event, 
+                error_status, 
+                gene_model_change,
+                build_change,
+                multimapping_difference)
+
+```
+
+### functions
+
+```{r}
+library(nVennR)
+
+create_venn_diagram = function(df, savedir=NULL, comparison, sig_gene_list, 
+                               # diff_gene_version_col="diff_version",
+                               annotation_comparison_col="gene_model_change",
+                               build_change_col="build_change", 
+                               multimap_diff_col="multimapping_difference",
+                               issue_col="error_status"){
+  # reason sets
+  # diff_gene_versions = merged_annot %>%
+  #   filter(!is.na(!!as.name(diff_gene_version_col))) %>%
+  #   filter(sig_tissue == !!tissue) %>%
+  #   pull(gene) %>% unique()
+  
+  if(is.null(savedir)) {
+    savedir = getwd()
+  }
+  
+  overlaps_issue = df %>% 
+    filter(!!as.name(issue_col)==1) %>% 
+    # filter(tissue == !!tissue) %>% 
+    pull(gene_id) %>% unique()
+  
+  gene_model_change = df %>% 
+    filter(!!as.name(annotation_comparison_col)==1) %>% 
+    # filter(tissue == !!tissue) %>% 
+    pull(gene_id) %>% unique()
+  
+  build_change = df %>% 
+    filter(!!as.name(build_change_col)==1) %>% 
+    # filter(tissue == !!tissue) %>% 
+    pull(gene_id) %>% unique()
+  
+  multimap_diff = df %>% 
+    filter(!!as.name(multimap_diff_col)==1) %>% 
+    # filter(tissue == !!tissue) %>% 
+    pull(gene_id) %>% unique()
+  
+
+  # make plot
+  v = plotVenn(list(`All build-dependent` = sig_gene_list,
+             `Overlaps known issue` = overlaps_issue,
+             `Update to gene model` = gene_model_change,
+             `Change in assembly` = build_change,
+             `Multimapping rates` = multimap_diff),
+             setColors = c("#f3f3f3", "#f4acca", "#ffff58", "#8cdab8", "#2cb3da"),
+             nCycles = 80000,
+             systemShow = T,
+             outFile = paste0(savedir, comparison, "_reason_vennDiagram.svg"),
+             labelRegions=F,
+             fontScale=2,
+             opacity=0.2,
+             borderWidth=2)
+  
+  
+}
+
+
+```
+
+### Blob Diagrams
+
+#### hg19:hg38
+
+```{r}
+# all build-dependent genes
+savedir="/oak/stanford/groups/smontgom/pgoddard/UDN/Code/rare_build/DifferentialExpression/ExploreTPMDiffResults"
+
+# all build-dependent
+all_build_dep_genes = hg19_hg38_reasons_toplot %>% pull(gene_id) %>% unique()
+create_venn_diagram(df=hg19_hg38_reasons_toplot, savedir=savedir, comparison="hg19_hg38.all_build_dep", all_build_dep_genes)
+
+# differentially quantified only
+hg19_hg38_reasons_toplot_diffquant = hg19_hg38_reasons_toplot %>% filter(hg19_hg38.is_diffquant==1)
+diffquant_build_dep_genes = hg19_hg38_reasons_toplot_diffquant %>% pull(gene_id) %>% unique()
+create_venn_diagram(df=hg19_hg38_reasons_toplot_diffquant, savedir=savedir, comparison="hg19_hg38.diff_quant", diffquant_build_dep_genes)
+
+
+```
+
+
+#### hg38:chm13
+
+```{r}
+# all build-dependent genes
+savedir="/oak/stanford/groups/smontgom/pgoddard/UDN/Code/rare_build/DifferentialExpression/ExploreTPMDiffResults"
+
+# all build-dependent
+all_build_dep_genes = hg38_chm13_reasons_toplot %>% pull(gene_id) %>% unique()
+create_venn_diagram(df=hg38_chm13_reasons_toplot, savedir=savedir, comparison="hg38_chm13.all_build_dep", all_build_dep_genes)
+
+# differentially quantified only
+hg38_chm13_reasons_toplot_diffquant = hg38_chm13_reasons_toplot %>% filter(hg38_chm13.is_diffquant==1)
+diffquant_build_dep_genes = hg38_chm13_reasons_toplot_diffquant %>% pull(gene_id) %>% unique()
+create_venn_diagram(df=hg38_chm13_reasons_toplot_diffquant, savedir=savedir, comparison="hg38_chm13.diff_quant", diffquant_build_dep_genes)
+
+```
+
+
+### Upset
+
+```{r}
+library(UpSetR)
+
+make_reasons_upset <- function(df, tissue = NULL,
+                                selected_events = c("differentially quantified"), 
+                               # diff_gene_version_col="diff_version",
+                               annotation_comparison_col="annot_diff",
+                               build_change_col="build_change", 
+                               multimap_diff_col="multimap_diff",
+                               issue_col){
+   
+   # pre-filter
+   df_filt = df %>% filter(build_dep_event %in% selected_events)
+   
+   # get lists
+   sig_gene_list = df_filt %>% pull(gene_id) %>% unique()
+   annot_change = df_filt %>% filter(gene_model_change == 1) %>% pull(gene_id) %>% unique()
+   build_change = df_filt %>% filter(build_change == 1) %>% pull(gene_id) %>% unique()
+   build_issues = df_filt %>% filter(error_status == 1) %>% pull(gene_id) %>% unique()
+   multimap_diff = df_filt %>% filter(multimapping_difference == 1) %>% pull(gene_id) %>% unique()
+   
+   
+   # get order
+  order = c(#length(sig_gene_list), 
+            length(annot_change), 
+            length(build_change), 
+            length(build_issues), 
+            length(multimap_diff))
+  names(order) = c(#"All diff quant genes", 
+                   "Gene model change", 
+                   "Detected build change*",
+                   "Overlaps known issue", 
+                   "Multimap rate change")
+  # order = sort(order)
+  
+  # make plot
+  listInput = list(#`All diff quant genes`= sig_gene_list, 
+                   `Gene model change` = annot_change, 
+                   `Detected build change*` = build_change, 
+                   `Overlaps known issue` = build_issues, 
+                   `Multimap rate change` = multimap_diff)
+  
+  u = upset(fromList(listInput), 
+            text.scale = 8,
+            point.size = 18,
+            line.size = 4,
+        sets = names(order), order.by = c("freq"), keep.order = TRUE)
+  print(u)
+  
+ }
+
+```
+
+#### hg19:hg38
+
+```{r fig.height=7, fig.width=12}
+
+make_reasons_upset(hg19_hg38_reasons_toplot)
+
+```
+
+
+#### hg38:chm13
+
+```{r fig.height=7, fig.width=12}
+
+make_reasons_upset(hg38_chm13_reasons_toplot)
+
+```
+
+
+## Outliers: Zdiff vs LogFC
+
+```{r}
+# library(ggpubr)
+
+zdiff_vs_logfc<-function(main_table,build1,build2){
+  
+  red_df=main_table %>% 
+    dplyr::select(gene_id, gene_name, tissue, 
+           paste0("logFC_",build2,"_",build1), 
+           paste0("adj_pval_",build2,"_",build1), 
+           paste0("mean_abs_zdiff_",build2,"_",build1)) %>%
+    dplyr::filter(tissue=="Blood" | tissue=="Fibroblast") %>%
+    rename(logFC=(paste0("logFC_",build2,"_",build1)),
+           adjPval=paste0("adj_pval_",build2,"_",build1),
+           zdiff=(paste0("mean_abs_zdiff_",build2,"_",build1))) %>%
+    mutate(same="same") %>%
+    mutate(adjPval=ifelse(adjPval<0.05, "significant", "not significant"))%>%
+    dplyr::filter(!is.na(logFC) & !is.na(zdiff)) %>%
+    mutate(abs_logFC=abs(logFC))
+  # tmp=rbind(head(red_df,1300),tail(red_df,1300))
+  
+  ggscatter(red_df, x="abs_logFC", y="zdiff", alpha=0.1,
+            add = "reg.line", conf.int = TRUE, 
+            color='tissue', shape='adjPval', size = 'adjPval') +
+    stat_cor(
+      aes(label = paste(..rr.label.., ..p.label.., sep = "~`,`~"),
+          group='same',
+          label.x.npc = "left", label.y.npc = "top"),
+    ) +
+    scale_x_continuous(name = "absolute logFC", 
+                       labels = scales::number, 
+                       # limits = c(0.00005, 10.5)
+                       trans = "log10",
+                       ) + 
+    scale_y_continuous(name = "mean absolute z-score difference", 
+                  labels = scales::comma,
+                  limits = c(0.00005, 1.5),
+                  trans="log10"
+                  ) +
+    # coord_trans(x = 'log10', y = 'log10') +
+    ggtitle(paste0(build1,":",build2)) +
+    scale_shape_manual(values = c(3, 19)) +
+    scale_size_manual(values = c(2,3)) +
+    scale_color_manual(values=c("#D90025","#27A795")) +
+    theme_bw(base_size = 20) +
+    theme(panel.grid.minor = element_blank())
+
+  
+}
+
+```
+
+
+```{r fig.height=2, fig.width=5}
+
+hg19hg38 = zdiff_vs_logfc(main_table, "hg19", "hg38")
+hg38chm13 = zdiff_vs_logfc(main_table, "hg38", "chm13")
+
+ggarrange(hg19hg38, 
+          hg38chm13 + 
+            theme(axis.title.y = element_blank(),
+                  axis.text.y = element_blank(),
+                  axis.ticks.y = element_blank()), 
+          common.legend = TRUE,
+          legend = "right",
+          widths = c(1, 0.9),
+          heights = c(0.3))
+
+```
+

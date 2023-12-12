@@ -1,0 +1,2097 @@
+---
+title: "Differential Expression Annotations"
+author: "P Goddard"
+date: '2023-01-17'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+library(data.table)
+library(tidyverse)
+.libPaths("/home/pgoddard/R/x86_64-pc-linux-gnu-library/4.1")
+
+`%notin%` <- Negate(`%in%`)
+
+```
+
+# TO DO --
+
+# Reference: Gene names
+
+```{r}
+gene_details_file = "/oak/stanford/groups/smontgom/shared/UDN/Analysis/ReferenceComparisonPrimary/gene_details.all_genes_diffexp_zscores_gtfcomp.tsv"
+
+if(file.exists(gene_details_file)){
+  
+  gene_details = fread(gene_details_file)
+  
+} else {
+  
+  library(biomaRt)
+  
+  ensembl <- useEnsembl(biomart = "genes", dataset = "hsapiens_gene_ensembl", mirror = "useast")
+  
+  genes = c(pull(genes_full, gene_id_hg38),  
+            pull(genes_full, gene_id_hg19), 
+            pull(genes_full, chm13gff_hg38_source)) %>% 
+    unique()
+  #,  pull(merged_long, gene_id), pull(z_sum, gene_id)) %>% unique()
+  
+  gene_details <- getBM(filters= "ensembl_gene_id", mart= ensembl , values = genes,
+                        attributes= c("ensembl_gene_id","chromosome_name","external_gene_name", "hgnc_symbol", "gene_biotype", "description")) %>% 
+    mutate(ensembl_gene_id = ifelse(external_gene_name == "PPIAL4C", "ENSG00000288867", ensembl_gene_id))
+  
+  # # check hgnc vs external gene name
+  # gene_details %>% filter(external_gene_name == "" & hgnc_symbol != "") # hgnc provided but no external name (0 genes)
+  # gene_details %>% filter(external_gene_name != "" & hgnc_symbol == "") # hgnc missing but external name provided (1299 genes)
+  # gene_details %>% filter(external_gene_name != hgnc_symbol & hgnc_symbol != "") # find all genes where both are present but don't match (2 genes)
+  # gene_details %>% group_by(ensembl_gene_id) %>% filter(n()>1) %>% arrange(ensembl_gene_id) # find all ensg IDs with multiple gene names (2 ensg IDs - same as the two with mismatched entries)
+  #   ensembl_gene_id external_gene_name hgnc_symbol gene_biotype   description                                                                   
+  #   <chr>           <chr>              <chr>       <chr>          <chr>                                                                         
+  # 1 ENSG00000230417 LINC00595          LINC00595   lncRNA         long intergenic non-protein coding RNA 595 [Source:HGNC Symbol;Acc:HGNC:31430]
+  # 2 ENSG00000230417 LINC00595          LINC00856   lncRNA         long intergenic non-protein coding RNA 595 [Source:HGNC Symbol;Acc:HGNC:31430]
+  # 3 ENSG00000276085 CCL3L1             CCL3L1      protein_coding C-C motif chemokine ligand 3 like 1 [Source:HGNC Symbol;Acc:HGNC:10628]       
+  # 4 ENSG00000276085 CCL3L1             CCL3L3      protein_coding C-C motif chemokine ligand 3 like 1 [Source:HGNC Symbol;Acc:HGNC:10628]
+  
+  # for this reason, I am going to rely on the external gene name
+  gene_details = gene_details %>% dplyr::select(-hgnc_symbol) %>% distinct()
+  
+  # save details
+  write_tsv(gene_details, "/oak/stanford/groups/smontgom/shared/UDN/Analysis/ReferenceComparisonPrimary/gene_details.all_genes_diffexp_zscores_gtfcomp.tsv")
+  rm(ensembl)
+}
+
+chrY_genes = gene_details %>% filter(chromosome_name =="Y")
+gc()
+
+
+hgnc_to_ensg <- gene_details %>% pull(ensembl_gene_id)
+names(hgnc_to_ensg) <- gene_details %>% pull(external_gene_name)
+
+ensg_to_hgnc <- gene_details %>% pull(external_gene_name)
+names(ensg_to_hgnc) <- gene_details %>% pull(ensembl_gene_id)
+
+
+# load map of gene symbols to aliases
+ref_dir="/oak/stanford/groups/smontgom/shared/UDN/ReferenceFiles/"
+alias_to_symbol = fread(paste0(ref_dir, "Homo_sapiens.gene_info.gz"))
+alias_to_symbol2 = alias_to_symbol %>% 
+  dplyr::select(Symbol, Synonyms, Symbol_from_nomenclature_authority) %>% 
+  separate_rows(Synonyms, sep = "\\|") %>% 
+  filter(Synonyms %notin% alias_to_symbol$Symbol)
+alias2symbol = c(alias_to_symbol2$Symbol, alias_to_symbol2$Symbol)
+names(alias2symbol) = c(alias_to_symbol2$Synonyms, alias_to_symbol2$Symbol)
+
+
+```
+
+
+
+# Annotation differences
+
+## Load chm13 gtf annotations
+
+```{r}
+ref_dir = "/oak/stanford/groups/smontgom/shared/UDN/Analysis/ReferenceComparisonPrimary/ReferenceFiles/"
+
+chm13_genes = fread(paste0(ref_dir, "chm13.draft_v2.0.gene_annotation.genes_with_header.bed")) %>% 
+  # drop Y
+  filter(chr != "chrY" | is.na(chr)) %>% 
+  # clean columns
+  rename(gene_id_chm13 = gene_id) %>% 
+  mutate(gene_version_chm13 = gene_id_chm13) %>% 
+  mutate(source_gene = ifelse(source_gene=="None", NA, source_gene)) %>% 
+  dplyr::select(-biotype, -chr, -start, -end, -strand, -source, -extra_paralog, -gene_name, -ensg) %>% 
+  rename(chm13gff_collapsed_genes = collapsed_gene_ids, 
+         chm13gff_alt_contigs = gene_alternate_contigs, 
+         chm13gff_hg38_source = source_gene,
+         ) %>% 
+  mutate(gene_id_hg38 = str_remove(chm13gff_hg38_source, "\\..*")) %>% 
+  # manually drop the old version of a gene with multiple source genes
+  filter(gene_version_chm13 != "LOFF_G0002018" | is.na(gene_version_chm13))
+
+gc()
+
+```
+
+
+## Load & parse Equivalence Table
+
+```{r}
+
+annot_comp = fread("/oak/stanford/groups/smontgom/shared/UDN/Analysis/ReferenceComparisonPrimary/AnnotationComparison_fromFabien/3_equivalenceRelationStructure_noYT2T_noParYhg19.Hg38.Hg19.T2T.all.tsv")  %>% 
+  rename(gene_version_hg38 = featId.hg38, 
+         gene_version_hg19 = featId.hg19,
+         gene_version_chm13 = featId.T2T) %>% 
+  mutate(gene_id_chm13 = gene_version_chm13,
+         gene_id_hg38 = str_remove(gene_version_hg38, "\\..*"),
+         gene_id_hg19 = str_remove(gene_version_hg19, "\\..*")) %>% 
+  # clean up gene names; there are some instances where the OttID and gene name are swapped
+  mutate(gene_name_hg38 = ifelse(str_detect(featName.hg38, "OTT") & !str_detect(featOttId.hg38, "OTT"), featOttId.hg38, featName.hg38),
+         gene_name_hg19 = ifelse(str_detect(featName.hg19, "OTT") & !str_detect(featOttId.hg19, "OTT"), featOttId.hg19, featName.hg19),
+         gene_name_chm13 = ifelse(str_detect(featName.T2T, "OTT") & !str_detect(featOttId.T2T, "OTT"), featOttId.T2T, featName.T2T)) %>% 
+  dplyr::select(-starts_with("transcript_id"),-starts_with("exon_id"), -starts_with("featOttId"), -starts_with("featName")) %>% 
+  distinct()
+    
+
+# get gene counts
+annot_comp %>% pull(gene_id_hg19) %>% na.omit() %>% n_distinct()
+annot_comp %>% pull(gene_id_hg38) %>% na.omit() %>% n_distinct()
+annot_comp %>% pull(gene_id_chm13) %>% na.omit() %>% n_distinct()
+
+
+# merge with chm13 gtf
+annot_comp = annot_comp %>% left_join(chm13_genes)
+annot_comp %>% pull(gene_id_chm13) %>% na.omit() %>% n_distinct()
+
+```
+
+```{r}
+# filter out Y chromosome genes
+annot_comp_noY = annot_comp %>% 
+  filter( (is.na(featChrom.hg19) | featChrom.hg19 != "chrY") & 
+          (is.na(featChrom.hg38) | featChrom.hg38 != "chrY") & 
+          (is.na(featChrom.T2T) | featChrom.T2T != "chrY")) 
+
+annot_comp_noY[annot_comp_noY==""] <- NA
+
+# get gene counts
+annot_comp_noY %>% pull(gene_id_hg19) %>% na.omit() %>% n_distinct()
+annot_comp_noY %>% pull(gene_id_hg38) %>% na.omit() %>% n_distinct()
+annot_comp_noY %>% pull(gene_id_chm13) %>% na.omit() %>% n_distinct()
+```
+
+```{r}
+# check eq_type values
+annot_comp_noY %>% filter(!is.na(gene_id_hg38) | !is.na(gene_id_hg19)) %>% group_by(eq_type.hg19) %>% summarize(n())
+
+annot_comp_noY %>% filter(!is.na(gene_id_hg38) | !is.na(gene_id_hg19)) %>% filter(is.na(eq_type.hg19))
+
+annot_comp_noY %>% filter(!is.na(gene_id_chm13) | !is.na(gene_id_hg38)) %>% group_by(eq_type.T2T) %>% summarize(n())
+
+
+# infer annotation-specific status where one build has a gene version but another doesn't
+annot_comp_noY_filled_eqtype = annot_comp_noY %>% 
+  # expand missing eq_type.T2T annotations
+  mutate(eq_type.T2T = ifelse(!is.na(eq_type.T2T), eq_type.T2T, 
+                              ifelse(is.na(gene_id_chm13) & !is.na(gene_id_hg38), "spec_hg38_inferred",
+                                     ifelse(!is.na(gene_id_chm13) & is.na(gene_id_hg38), "spec_chm13_inferred", NA)))) %>% 
+  # expand missing eq_type.hg19 annotations
+  mutate(eq_type.hg19 = ifelse(!is.na(eq_type.hg19), eq_type.hg19,
+                              ifelse(!is.na(gene_id_hg19) & is.na(gene_id_hg38), "spec_hg19_inferred",
+                                     ifelse(is.na(gene_id_hg19) & !is.na(gene_id_hg38), "spec_hg38_inferred", NA)
+                                     ))
+         )
+
+
+# sanity checks
+annot_comp_noY_filled_eqtype %>% filter(eq_type.T2T == "spec_hg38_inferred") %>% filter(gene_id_hg38 %in% chm13_genes$gene_id_hg38)
+
+annot_comp_noY_filled_eqtype %>%
+  filter(!is.na(gene_id_chm13) | !is.na(gene_id_hg38)) %>%
+  group_by(eq_type.T2T) %>%
+  summarize(n_hg38 = n_distinct(na.omit(gene_id_hg38)), n_chm13 = n_distinct(na.omit(gene_id_chm13)))
+
+annot_comp_noY_filled_eqtype %>%
+  filter(!is.na(gene_id_hg19) | !is.na(gene_id_hg38)) %>% # filter(is.na(eq_type.hg19)) %>% mutate(eq_type.hg19 = ifelse(is.na(eq_type.hg19),
+  group_by(eq_type.hg19) %>%
+  summarize(n_hg38 = n_distinct(na.omit(gene_id_hg38)), n_hg19 = n_distinct(na.omit(gene_id_hg19)))
+
+```
+
+```{r}
+# create gene_id column for merging purposes
+genes_full = annot_comp_noY_filled_eqtype %>% 
+  mutate(gene_id = ifelse(is.na(gene_version_hg38) & !is.na(gene_version_hg19), gene_id_hg19, 
+                          ifelse(str_detect(eq_type.T2T, 'spec_T2T|1_to_N') | (!is.na(gene_version_chm13) & is.na(gene_version_hg38)), gene_id_chm13, 
+                                 ifelse(!is.na(gene_version_hg38), gene_id_hg38, NA)))) %>% 
+  # label gene_id column with the build the gene_id was pulled from
+  mutate(gene_id_from = ifelse(is.na(gene_version_hg38) & !is.na(gene_version_hg19), "gene_id_hg19", 
+                               ifelse(str_detect(eq_type.T2T, 'spec_T2T|1_to_N') | (!is.na(gene_version_chm13) & is.na(gene_version_hg38)), "gene_id_chm13", 
+                                      ifelse(!is.na(gene_version_hg38), "gene_id_hg38", NA)))) %>% 
+  dplyr::select(-starts_with(c("featOttId", "featName"))) %>% 
+  # drop rows missing transcript / exon stats for all builds
+  filter(!is.na(transcript_nb.hg19) | !is.na(transcript_nb.hg38) | !is.na(transcript_nb.T2T)) %>%
+  distinct()
+
+
+table(genes_full$gene_id_from)
+  # gene_id_chm13  gene_id_hg19  gene_id_hg38 
+  #          3573          3515         60143
+
+```
+
+```{r}
+# function to collapse rows and leave NA as NA
+paste_rows <- function(x) {
+  unique_x <- unique(x[!is.na(x)])
+  ifelse(length(unique_x) == 0, NA, paste(unique_x, collapse = "&"))
+}
+
+# identify genes with duplicate rows
+duplicate_entries_table = genes_full %>% group_by(gene_id) %>% filter(n() > 1)
+duplicate_entries_table %>% pull(gene_id) %>% na.omit() %>% n_distinct()
+
+duplicate_entries_table %>% arrange(gene_id)
+
+# collapse duplicates, replacing NA with data from duplicate rows where possible
+genes_full_dedupe = genes_full %>% 
+  # group_by(across(c(gene_version_hg38:featStrand.hg38))) %>% 
+  group_by(gene_id, gene_id_from, gene_id_hg38, gene_id_hg19,gene_id_chm13, chm13gff_hg38_source, chm13gff_collapsed_genes, chm13gff_alt_contigs) %>% 
+  summarise(across(everything(), paste_rows)) %>% 
+  ungroup()
+
+genes_full_dedupe %>% group_by(gene_id) %>% filter(n() > 1) %>% pull(gene_id) %>% na.omit() %>% n_distinct()
+genes_full_dedupe %>% filter_all(any_vars(grepl("&", .))) %>% pull(gene_id) %>% na.omit() %>% n_distinct()
+
+
+```
+
+### Quick Stats
+
+
+```{r}
+cat("hg19 vs hg38\n")
+cat("\n  eq.type == 1_to_1\n")
+genes_full_dedupe %>% filter(eq_type.hg19 == "1_to_1") %>% pull(gene_id_hg38) %>% na.omit() %>% n_distinct()
+cat("  eq.type contains 1_to_1\n")
+genes_full_dedupe %>% filter(str_detect(eq_type.hg19, "1_to_1")) %>% pull(gene_id_hg38) %>% na.omit() %>% n_distinct()
+
+cat("\n  eq.type == spec_hg19\n")
+genes_full_dedupe %>% filter(eq_type.hg19=="spec_hg19") %>% pull(gene_id_hg19) %>% na.omit() %>% n_distinct()
+cat("  eq.type contains spec_hg19\n")
+genes_full_dedupe %>% filter(str_detect(eq_type.hg19, "spec_hg19")) %>% pull(gene_id_hg19) %>% na.omit() %>% n_distinct()
+
+cat("\n  eq.type == spec_hg38\n")
+genes_full_dedupe %>% filter(eq_type.hg19 == "spec_hg38") %>% pull(gene_id_hg38) %>% na.omit() %>% n_distinct()
+cat("  eq.type contains spec_hg38\n")
+genes_full_dedupe %>% filter(str_detect(eq_type.hg19, "spec_hg38")) %>% pull(gene_id_hg38) %>% na.omit() %>% n_distinct()
+
+
+cat("\n\nhg38 vs chm13\n")
+cat("\n  eq.type == 1_to_1\n")
+genes_full_dedupe %>% filter(eq_type.T2T == "1_to_1") %>% pull(gene_id_hg38) %>% na.omit() %>% n_distinct()
+cat("  eq.type contains 1_to_1\n")
+genes_full_dedupe %>% filter(str_detect(eq_type.T2T, "1_to_1")) %>% pull(gene_id_hg38) %>% na.omit() %>% n_distinct()
+
+cat("\n  eq.type == spec_hg38\n")
+genes_full_dedupe %>% filter(eq_type.T2T == "spec_hg38") %>% pull(gene_id_hg38) %>% na.omit() %>% n_distinct()
+cat("  eq.type contains spec_hg38\n")
+genes_full_dedupe %>% filter(str_detect(eq_type.T2T, "spec_hg38")) %>% pull(gene_id_hg38) %>% na.omit() %>% n_distinct()
+
+
+
+cat("\n  eq.type == spec_chm13\n")
+genes_full_dedupe %>% filter(eq_type.T2T=="spec_T2T") %>% pull(gene_id_chm13) %>% na.omit() %>% n_distinct()
+cat("  eq.type contains spec_chm13\n")
+genes_full_dedupe %>% filter(str_detect(eq_type.T2T, "spec_T2T")) %>% pull(gene_id_chm13) %>% na.omit() %>% n_distinct()
+
+
+
+cat("\nhg38-specific compared to BOTH\n")
+genes_full_dedupe %>%
+  filter(str_detect(eq_type.hg19, "spec_hg38") & str_detect(eq_type.T2T, "spec_hg38")) %>% 
+  pull(gene_id_hg38) %>% 
+  na.omit() %>% 
+  n_distinct()
+
+```
+
+```{r}
+
+# get quick numbers
+table(genes_full_dedupe$gene_id_from)
+  # gene_id_chm13  gene_id_hg19  gene_id_hg38 
+  #          3573          3515         60143
+
+table(genes_full_dedupe$eq_type.hg19)
+  # 1_to_1             1_to_1_sub              1_to_1.Id         1_to_1.Id_Name      1_to_1.Version_Id 1_to_1.Version_Id_Name              spec_hg19              spec_hg38     spec_hg38_inferred 
+  # 54568                    357                     67                    824                    669                   4214                   3515                     97                   1972 
+
+table(genes_full_dedupe$eq_type.T2T)
+ # 1_to_1  1_to_1.sourceParalogs             spec_hg38    spec_hg38_inferred   spec_hg38.collapsed              spec_T2T     spec_T2T.Paralogs 
+ # 58893                     922                    71                   225                    26                   942                  2631
+
+
+table(genes_full_dedupe$eq_structure.hg19)
+ # ex_diff ex_lenght_diff   no_structure       seq_diff       seq_same        tr_diff 
+ #     784           1010              6           1271          57254            149 
+
+genes_full_dedupe %>% filter(eq_structure.hg19=="no_structure")
+
+table(genes_full_dedupe$eq_structure.T2T)
+ # ex_diff ex_length_diff       seq_diff       seq_same        tr_diff 
+ #    3069          10693          18439          26876           1397 
+
+```
+
+### !! Clean up annotation comparison !!
+
+```{r}
+
+genes_full_clean = genes_full_dedupe %>% 
+  # add indicator for novel chm13 genes that are considered paralogs
+  mutate(is_novel_paralog_chm13 = ifelse(eq_type.T2T == "spec_T2T.Paralogs", 1, 0)) %>% 
+  
+  # clean up annotation status variables
+  mutate(eq_type.hg19 = ifelse(str_detect(eq_type.hg19, "1_to_1"), "1_to_1",
+                               ifelse((str_detect(eq_type.hg19, "spec_hg38") | eq_type.hg19 == "no_structure") & gene_id_from == "gene_id_hg38", "hg38_specific",
+                                      ifelse(str_detect(eq_type.hg19, "spec_hg19"), 
+                                             "hg19_specific", NA)))) %>% 
+  mutate(eq_type.hg19 = ifelse(gene_id_from == "gene_id_chm13", NA, eq_type.hg19)) %>% 
+  mutate(eq_type.T2T = ifelse(str_detect(eq_type.T2T, "1_to_1"), "1_to_1",
+                               ifelse(str_detect(eq_type.T2T, "spec_hg38"), "hg38_specific",
+                                      ifelse(str_detect(eq_type.T2T, "spec_T2T"), 
+                                             "chm13_specific", NA)))) %>% 
+  
+  # clean up gene model comparison 
+  mutate(eq_structure.hg19 = ifelse(gene_id_from == "gene_id_chm13" |
+                                      eq_structure.hg19 == "no_structure" |
+                                      eq_type.hg19 != "1_to_1", NA, eq_structure.hg19)) %>% 
+  mutate(eq_structure.hg19 = fct_recode(eq_structure.hg19, "identical gene model" = "seq_same",
+                                       "identical gene model" = "seq_diff",
+                                       "transcript_count_diff" = "tr_diff",
+                                       "exon_count_diff" = "ex_diff",
+                                       "exon_length_diff" = "ex_lenght_diff")) %>% 
+  mutate(eq_structure.T2T = fct_recode(eq_structure.T2T, "identical gene model" = "seq_same",
+                                       "identical gene model" = "seq_diff",
+                                       "transcript_count_diff" = "tr_diff",
+                                       "exon_count_diff" = "ex_diff",
+                                       "exon_length_diff" = "ex_length_diff")) %>% 
+  
+  # backcalculate gene model comparison for genes that should have it but don't
+  mutate(eq_structure.hg19 = as.character(eq_structure.hg19)) %>% 
+  mutate(eq_structure.hg19 = ifelse(eq_type.hg19 == "1_to_1" & !is.na(eq_structure.hg19), eq_structure.hg19,
+                                    ifelse(eq_type.hg19 == "1_to_1" & transcript_nb.hg38 != transcript_nb.hg19, "transcript_count_diff",
+                                           ifelse(eq_type.hg19 == "1_to_1" & exon_nb.hg38 != exon_nb.hg19, "exon_count_diff",
+                                                  ifelse(eq_type.hg19 == "1_to_1" & exon_length.hg38 != exon_length.hg19, "exon_length_diff", "identical gene model"))))) %>%
+  mutate(eq_structure.hg19 = ifelse(gene_id_from == "gene_id_chm13" |
+                                      eq_structure.hg19 == "no_structure" | eq_type.hg19 != "1_to_1", NA, eq_structure.hg19)) %>% 
+  
+  mutate(eq_structure.T2T = as.character(eq_structure.T2T)) %>% 
+  mutate(eq_structure.T2T = ifelse(!is.na(eq_structure.T2T), eq_structure.T2T,
+                                    ifelse(eq_type.T2T == "1_to_1" & transcript_nb.hg38 != transcript_nb.T2T, "transcript_count_diff",
+                                           ifelse(eq_type.T2T == "1_to_1" & exon_nb.hg38 != exon_nb.T2T, "exon_count_diff",
+                                                  ifelse(eq_type.T2T == "1_to_1" & exon_length.hg38 != exon_length.T2T, "exon_length_diff", "identical gene model")))))
+  
+
+```
+
+
+### More stats
+
+```{r}
+
+genes_full_clean %>% 
+  group_by(eq_type.hg19) %>% 
+  summarise(n_genes = n_distinct(na.omit(gene_id)))
+
+genes_full_clean %>% 
+  filter(eq_type.hg19 == "1_to_1") %>% 
+  group_by(eq_structure.hg19) %>% 
+  summarise(n_genes = n_distinct(na.omit(gene_id)))
+
+
+
+genes_full_clean %>% 
+  group_by(eq_type.T2T) %>% 
+  summarise(n_genes = n_distinct(na.omit(gene_id)))
+
+genes_full_clean %>% 
+  filter(eq_type.T2T == "1_to_1") %>% 
+  group_by(eq_structure.T2T) %>% 
+  summarise(n_genes = n_distinct(na.omit(gene_id)))
+
+```
+
+### !! jaro winkler numbers !!
+
+```{r}
+
+genes_full_clean %>% 
+  filter(eq_structure.hg19 == "identical gene model" & !is.na(distance_gn_mean.hg19)) %>% pull(gene_id) %>% na.omit() %>%  n_distinct()
+
+genes_full_clean %>% 
+  filter(eq_structure.hg19 == "identical gene model" & !is.na(distance_gn_mean.hg19)) %>% 
+  mutate(distance_gn_mean.hg19 = as.numeric(distance_gn_mean.hg19)) %>% 
+  ggplot(aes(x = distance_gn_mean.hg19)) + geom_histogram() + scale_y_continuous(trans="log10")
+
+
+genes_full_clean %>% 
+  filter(eq_structure.T2T == "identical gene model" & !is.na(distance_gn_mean.T2T)) %>% 
+  mutate(distance_gn_mean.T2T = as.numeric(distance_gn_mean.T2T)) %>% 
+  ggplot(aes(x = distance_gn_mean.T2T)) + geom_histogram() + scale_y_continuous(trans="log10")
+
+genes_full_clean %>% 
+  filter(eq_structure.T2T == "identical gene model" & !is.na(distance_gn_mean.T2T)) %>% pull(gene_id) %>% na.omit() %>%  n_distinct()
+
+```
+
+```{r}
+# clean up
+rm(annot_comp_noY, annot_comp_noY_filled_eqtype, duplicate_entries_table, genes_full, genes_full_dedupe)
+gc()
+
+```
+
+# Errors & Issues
+
+### ENCODE Blacklist
+
+```{r}
+ref_dir = "/oak/stanford/groups/smontgom/shared/UDN/Analysis/ReferenceComparisonPrimary/ReferenceFiles/"
+hg19_blacklistFile = "gencode.v35lift37.annotation.genes.hg38-blacklist.v2.txt"
+hg38_blacklistFile = "gencode.v35.primary_assembly.annotation.genes.hg38-blacklist.v2.txt"
+chm13_blacklistFile = "chm13.draft_v2.0.gene_annotation.genes.T2T.excluderanges.blacklist.txt"
+
+hg19_blacklist = fread(paste0(ref_dir, hg19_blacklistFile)) %>% 
+  mutate(gene_id_hg19 = str_remove(gene_version, "\\..*")) %>% 
+  mutate(blacklist_reason = ifelse(blacklist_reason == ".", NA, blacklist_reason)) %>% 
+  group_by(gene_id_hg19) %>% 
+  summarize(blacklist_reason = paste0(na.omit(unique(blacklist_reason)), collapse = ",")) %>%
+  ungroup() %>% 
+  dplyr::select(gene_id_hg19, hg19_blacklist_reason = blacklist_reason)
+
+hg38_blacklist = fread(paste0(ref_dir, hg38_blacklistFile)) %>% 
+  mutate(gene_id_hg38 = str_remove(gene_version, "\\..*")) %>% 
+  mutate(blacklist_reason = ifelse(blacklist_reason == ".", NA, blacklist_reason)) %>% 
+  group_by(gene_id_hg38) %>% 
+  summarize(blacklist_reason = paste0(na.omit(unique(blacklist_reason)), collapse = ",")) %>%
+  ungroup() %>% 
+  dplyr::select(gene_id_hg38, hg38_blacklist_reason = blacklist_reason)
+
+chm13_blacklist = fread(paste0(ref_dir, chm13_blacklistFile)) %>% 
+  # mutate(gene_id = stchm13_blacklistr_remove(gene_version, "\\..*")) %>% 
+  mutate(blacklist_reason = ifelse(blacklist_reason == ".", NA, blacklist_reason)) %>% 
+  group_by(gene_id) %>% 
+  summarize(blacklist_reason = paste0(na.omit(unique(blacklist_reason)), collapse = ",")) %>%
+  ungroup() %>% 
+  dplyr::select(gene_id_chm13 = gene_id, chm13_blacklist_reason = blacklist_reason)
+
+
+genes_full_annot = genes_full_clean %>% 
+  left_join(hg19_blacklist) %>% 
+  left_join(hg38_blacklist) %>% 
+  left_join(chm13_blacklist) %>% 
+  distinct()
+
+rm(hg38_blacklist, hg19_blacklist, chm13_blacklist, hg19_blacklistFile, hg38_blacklistFile, chm13_blacklistFile)
+gc()
+
+```
+
+### !! Build Issues
+
+!!! Work on improving this !!!
+
+- hg19 issues RESOLVED in hg38 (create another column)
+- if issue is marked "resolved" don't list it as an issue
+- 
+
+```{r}
+ref_dir = "/oak/stanford/groups/smontgom/shared/UDN/Analysis/ReferenceComparisonPrimary/ReferenceFiles/genome_issues/"
+
+hg19_issues = fread(paste0(ref_dir, "hg19_gencodev35lift37_hg19grcIncidentDb.txt")) %>% 
+  mutate(gene_id_hg19 = str_remove(gene_version, "\\..*")) %>% 
+  mutate(hg19.issue_status = ifelse(issue_status == ".", NA, issue_status),
+         hg19.issue_type = ifelse(issue_type == ".", NA, issue_type)) %>% 
+  dplyr::select(gene_id_hg19, issue_tag, hg19.issue_type, hg19.issue_status) #%>% 
+  # collapse to single row per gene
+  # group_by(gene_id_hg19) %>% 
+  # summarise( hg19_issue = toString(unique(na.omit(issue_type))),
+  #            hg19_issue_status = toString(unique(na.omit(issue_status)))) %>% 
+  # ungroup()
+
+hg38_issues = fread(paste0(ref_dir, "hg38_gencodev35primary_hg38grcIncidentDb.txt")) %>% 
+  mutate(gene_id_hg38 = str_remove(gene_version, "\\..*")) %>% 
+  
+  mutate(hg38.issue_status = ifelse(issue_status == ".", NA, issue_status),
+         hg38.issue_type = ifelse(issue_type == ".", NA, issue_type)) %>% 
+  dplyr::select(gene_id_hg38, issue_tag, hg38.issue_type, hg38.issue_status) #%>% 
+  # collapse to single row per gene
+  # group_by(gene_id_hg38) %>% 
+  # summarise( hg38_issue = toString(unique(na.omit(issue_type))),
+  #            hg38_issue_status = toString(unique(na.omit(issue_status)))) %>% 
+  # ungroup()
+
+grch_issues = full_join(hg19_issues, hg38_issues, by = "issue_tag")
+
+chm13_issues = fread(paste0(ref_dir, "chm13.draft_v2.0.gene_annotation.genes.CHM13v2.0_issues.txt"), fill=T) %>% 
+  mutate(issue_type = ifelse(issue_type == ".", NA, issue_type)) %>% 
+  dplyr::select(gene_id_chm13 = gene_id, issue_type) %>% 
+  # collapse to single row per gene
+  group_by(gene_id_chm13) %>% 
+  summarise(chm13_issue = toString(unique(na.omit(issue_type))) ) %>% 
+  ungroup()
+  
+
+genes_full_annot = genes_full_annot %>% 
+  left_join(hg19_issues) %>% 
+  left_join(hg38_issues) %>% 
+  left_join(chm13_issues) %>% 
+  distinct()
+
+rm(hg19_issues, hg38_issues, chm13_issues)
+gc()
+
+```
+
+
+
+# Build updates
+
+### hg38 vs hg19
+
+```{r}
+
+ref_dir = "/oak/stanford/groups/smontgom/shared/UDN/Analysis/ReferenceComparisonPrimary/ReferenceFiles/"
+
+hg38_hg19_contig_diffs_hg38 = fread(paste0(ref_dir, "gencode.v35.primary_assembly.annotation.genes.hg38_hg19_contig_diffs.txt")) %>% 
+  dplyr::select(gene_id = gene_id, difference) %>%
+    mutate(difference = ifelse(difference == ".", NA, difference))  %>% 
+    mutate(ref_gtf = "hg38")
+
+hg38_hg19_contig_diffs_hg19 = fread(paste0(ref_dir, "gencode.v35lift37.annotation.genes.hg38_hg19_contig_diffs.txt")) %>% 
+  dplyr::select(gene_id = gene_id, difference) %>% 
+    mutate(difference = ifelse(difference == ".", NA, difference)) %>% 
+    mutate(ref_gtf = "hg19")
+
+hg38_hg19_contig_diffs = rbind(hg38_hg19_contig_diffs_hg38, hg38_hg19_contig_diffs_hg19) %>% 
+  distinct() %>% 
+    group_by(gene_id) %>% 
+    summarise(build_change_h38_hg19 = toString(unique(na.omit(difference))),
+              ref_gtf = toString(unique(na.omit(ref_gtf)))) %>% 
+    ungroup() %>% 
+    mutate(build_change_h38_hg19 = ifelse(build_change_h38_hg19=="", NA, build_change_h38_hg19)) %>% 
+    dplyr::select(-ref_gtf)
+
+
+genes_full_annot = genes_full_annot %>% left_join(hg38_hg19_contig_diffs)
+rm(hg38_hg19_contig_diffs_hg38, hg38_hg19_contig_diffs_hg19, hg38_hg19_contig_diffs)
+gc()
+
+genes_full_annot %>% group_by(gene_id) %>% summarize(n=n()) %>% filter(n>1) %>% arrange(desc(n))
+
+```  
+
+### hg38 vs chm13
+
+```{r}
+
+ref_dir = "/oak/stanford/groups/smontgom/shared/UDN/Analysis/ReferenceComparisonPrimary/ReferenceFiles/"
+
+chm13uniq_hg38 = fread(paste0(ref_dir, "chm13.draft_v2.0.gene_annotation.genes.chm13v2-unique_vs_hg38.txt")) %>% 
+  mutate(gene_length = abs(end - start)) %>% 
+  mutate(prop_gene_overlap_chm13uniq = chm13_uniq_region_overlap / gene_length) %>% 
+  group_by(gene_id, gene_length) %>% 
+  summarize(prop_gene_overlap_chm13uniq = max(prop_gene_overlap_chm13uniq, na.rm=T)) %>% 
+  dplyr::select(gene_id_chm13 = gene_id, prop_gene_overlap_chm13uniq_vs_hg38 = prop_gene_overlap_chm13uniq)
+
+chm13uniq_hg19 = fread(paste0(ref_dir, "chm13.draft_v2.0.gene_annotation.genes.chm13v2-unique_vs_hg19.txt")) %>% 
+  mutate(gene_length = abs(end - start)) %>% 
+  mutate(prop_gene_overlap_chm13uniq = chm13_uniq_region_overlap / gene_length) %>% 
+  group_by(gene_id, gene_length) %>% 
+  summarize(prop_gene_overlap_chm13uniq = max(prop_gene_overlap_chm13uniq, na.rm=T)) %>% 
+  dplyr::select(gene_id_chm13 = gene_id, prop_gene_overlap_chm13uniq_vs_hg19 = prop_gene_overlap_chm13uniq)
+
+chm13uniq_vs_hg = full_join(chm13uniq_hg38, chm13uniq_hg19)
+
+
+chm13diff_details = fread(paste0(ref_dir, "s13_medicallyrelevant_chm13_impacted.csv")) %>% 
+      dplyr::select(hgnc = gene_name, impacted=`Impacted?`, 
+                    Nonsyntenic_GRCh38:snv_benchmark_CHM13,
+                    starts_with("cluster"),
+                    starts_with("missing_dups"), false_dups_GRCh38,
+                    hifi_genomes_svs_af1_GRCh38, hifi_genomes_svs_af1_CHM13) %>% 
+      mutate(gene_name =  ifelse(hgnc %in% gene_details$external_gene_name, hgnc, alias2symbol[hgnc])) %>% 
+      mutate(gene_id_hg38 = hgnc_to_ensg[gene_name]) %>% 
+      gather(key = "build_change", value = "value", -gene_id_hg38, -hgnc, -gene_name) %>% 
+      mutate(value = ifelse(value == 0 | value == "-" | value == "", NA, value)) %>% 
+      mutate(build_change = ifelse(is.na(value), NA, build_change)) %>% 
+      dplyr::select(gene_id_hg38, build_change) %>% 
+      distinct()
+    
+chm13diff = chm13diff_details %>% 
+      group_by(gene_id_hg38) %>% 
+      summarize(build_change = toString(unique(na.omit(build_change )))) %>% 
+      ungroup() %>% 
+      mutate(build_change = ifelse(build_change == "", NA, build_change)) %>% 
+      rename(build_change_chm13_hg38_medically_relevant_genes = build_change) %>% 
+      # drop rows with no ensg ID
+      filter(!is.na(gene_id_hg38)) 
+
+
+genes_full_annot = genes_full_annot %>% left_join(chm13diff) %>% distinct()
+genes_full_annot = genes_full_annot %>% left_join(chm13uniq_vs_hg) %>% distinct()
+rm(chm13uniq_hg38, chm13uniq_hg19, chm13uniq_vs_hg, chm13diff_details, chm13diff)
+
+genes_full_annot %>% group_by(gene_id) %>% summarize(n=n()) %>% filter(n>1) %>% arrange(desc(n))
+
+```
+
+
+# Psuedogene-Parent gene pairs (!!)
+
+<!-- ### hg38 -->
+
+<!-- ```{r} -->
+<!-- ref_dir = "/oak/stanford/groups/smontgom/shared/UDN/Analysis/ReferenceComparisonPrimary/ReferenceFiles/" -->
+<!-- grch_pseudo_pairs = fread(paste0(ref_dir, "pseudo_parent_gene_pairs.gustavsson2022.txt")) %>%  -->
+<!--   # drop erroneous MT1P2 entry -->
+<!--   filter(ID != "ENST00000262499.5") -->
+<!-- # chm_pseudo_pairs = fread(paste0(ref_dir,"")) -->
+
+<!-- pseudogenes = grch_pseudo_pairs %>% -->
+<!--   dplyr::select(parent_version = Parent_gene, pseudo_name) %>% -->
+<!--   mutate(hg38_paralog_parentgene_hg38  = str_remove(parent_version, "\\..*")) %>% -->
+<!--   mutate(gene_name = ifelse(pseudo_name %in% gene_details$external_gene_name,  -->
+<!--                             pseudo_name, alias2symbol[pseudo_name])) %>%  -->
+<!--   mutate(gene_id_hg38 = ifelse(gene_name == "LOC102723475", "ENSG00000276289", -->
+<!--                                hgnc_to_ensg[gene_name])) %>%  -->
+<!--   mutate(is_pseudogene_hg38 = 1) %>%  -->
+<!--   dplyr::select(gene_id_hg38, is_pseudogene_hg38, hg38_paralog_parentgene_hg38) %>%  -->
+<!--   filter(!is.na(gene_id_hg38)) %>%  -->
+<!--   distinct() -->
+
+<!-- parentgenes = grch_pseudo_pairs %>%  -->
+<!--   mutate(has_pseudogenes_hg38 = 1) %>%  -->
+<!--   mutate(gene_id_hg38  = str_remove(Parent_gene, "\\..*")) %>% -->
+<!--   dplyr::select(gene_id_hg38, has_pseudogenes_hg38) %>%  -->
+<!--   filter(!is.na(gene_id_hg38)) %>%  -->
+<!--   distinct() -->
+
+<!-- genes_full_annot = genes_full_annot %>% left_join(parentgenes) %>% left_join(pseudogenes) -->
+<!-- rm(grch_pseudo_pairs, pseudogenes, parentgenes) -->
+
+<!-- ``` -->
+
+<!-- ### chm13 -->
+
+<!-- ```{r} -->
+
+<!-- genes_full_annot = genes_full_annot %>%  -->
+<!--   mutate(is_pseudogene_chm13 = ifelse(eq_type.T2T == "spec_T2T.Paralogs", 1, 0), -->
+<!--          chm13_paralog_parentgene_hg38 = ifelse(eq_type.T2T == "spec_T2T.Paralogs", gene_id_hg38, NA)) %>%  -->
+<!--   mutate(gene_id_hg38 = ifelse(eq_type.T2T == "spec_T2T.Paralogs", NA, gene_id_hg38), -->
+<!--          gene_version_hg38 = ifelse(eq_type.T2T == "spec_T2T.Paralogs", NA, gene_version_hg38) -->
+<!--          ) -->
+
+<!-- chm13_parentgenes = genes_full_annot %>%  -->
+<!--   dplyr::select(chm13_paralog_parentgene_hg38, gene_id_chm13) %>%  -->
+<!--   filter(!is.na(chm13_paralog_parentgene_hg38)) %>%  -->
+<!--   group_by(chm13_paralog_parentgene_hg38) %>%  -->
+<!--   summarize(n_pseudogenes_chm13 = n_distinct(gene_id_chm13)) -->
+
+<!-- genes_full_annot = genes_full_annot %>%  -->
+<!--   mutate(has_pseudogene_chm13 = ifelse(gene_id_hg38 %in% chm13_parentgenes$chm13_paralog_parentgene_hg38, 1, 0)) %>%  -->
+<!--   left_join(chm13_parentgenes) -->
+
+<!-- rm(chm13_parentgenes) -->
+
+<!-- ``` -->
+
+
+# hg19-hg38 discrep snps
+
+```{r}
+
+ref_dir="/oak/stanford/groups/smontgom/shared/UDN/ReferenceFiles/"
+discreps_snps = fread(paste0(ref_dir, "exome_discrep_enriched_genes_li2021.txt")) %>% 
+  mutate(gene_name = ifelse(gene %in% gene_details$external_gene_name, 
+                            gene, alias2symbol[gene])) %>% 
+  mutate(gene_id = ifelse(gene_name == "LOC102723475", "ENSG00000276289",
+                               ifelse(gene_name == "PPIAL4C", "ENSG00000263464",
+                                      ifelse(gene_name == "PPIAL4D", "ENSG00000256374",
+                                             ifelse(gene_name == "LOC102724594", "ENSG00000275895",
+                                                    hgnc_to_ensg[gene_name]))))) %>%
+  mutate(discrep_var_hg38_hg19 = "yes") %>% 
+  dplyr::select(gene_id, discrep_var_hg38_hg19) %>%
+  distinct()
+
+discreps_snps %>% filter(gene_id %notin% genes_full_annot$gene_id)
+
+genes_full_annot2 = genes_full_annot %>% left_join(discreps_snps) %>% distinct()
+genes_full_annot2 %>% filter(discrep_var_hg38_hg19 == "yes") %>% pull(gene_id) %>% na.omit() %>% n_distinct()
+# rm(discreps_snps)
+gc()
+```
+
+
+# Medically relevant annotation
+
+### OMIM 
+
+```{r}
+
+ref_dir="/oak/stanford/groups/smontgom/shared/UDN/ReferenceFiles/"
+pheno2gene="morbidmap.txt"
+pheno2gene_clean="morbidmap_clean_updated3.txt"
+
+if(file.exists( paste0(ref_dir, pheno2gene_clean) )){
+  
+  pheno_clean = fread(paste0(ref_dir, pheno2gene_clean))
+  
+} else {
+
+  pheno = fread(paste0(ref_dir, pheno2gene))
+  colnames(pheno) = c("pheno","gene","mim","cyto")
+  
+  pheno_clean = pheno %>% 
+    # split phnotype column into usable data:
+    # phenotype, phenotype ID (confidence)
+    extract(pheno, into = c("pheno", "confidence"), "(.*) \\(([0-9]+)\\)$", convert=T) %>%
+    mutate(pheno = ifelse(!str_detect(pheno, ","), paste0(pheno,", 000000"), pheno)) %>% 
+    extract(pheno, into = c("phenotype", "pheno_mim"), "^(.*), ([0-9]{6})$", convert=T, remove = F) %>% 
+    mutate(pheno_mim = ifelse(pheno_mim==000000, NA, pheno_mim)) %>% 
+    mutate(pheno = ifelse(is.na(phenotype), pheno, phenotype)) %>% 
+    dplyr::select(-phenotype) %>% 
+    mutate(status = ifelse(confidence == 1, "association", 
+                           ifelse(confidence == 2, "linakge_mapping", 
+                                  ifelse(confidence == 3, "known_molec_cause", 
+                                         ifelse(confidence == 4, "del_dup_syndrome", NA))))) %>% 
+    separate_rows(gene, convert = T, sep=", ") %>% 
+    dplyr::select(-mim) %>% 
+    mutate(approved_symbol = ifelse(gene %in% gene_details$external_gene_name, gene, alias2symbol[gene])) %>% 
+    mutate(ensg = ifelse(approved_symbol == "LOC102723475", "ENSG00000276289",
+                               hgnc_to_ensg[approved_symbol])) %>% 
+    distinct() %>% 
+    # fill down ensg within groups
+    group_by(pheno, pheno_mim, confidence, status, cyto, approved_symbol) %>% 
+    mutate(approved_symbol = ifelse(!is.na(ensg), approved_symbol, NA)) %>%
+    summarize(ensg = toString(na.omit(ensg)),
+              approved_symbol = toString(na.omit(approved_symbol)),
+              hgnc = toString(na.omit(gene))) %>% 
+    ungroup() %>% 
+    separate_rows(ensg, approved_symbol, convert=T, sep=", ") %>% 
+    distinct() %>% 
+    # add is_OMIM_gene binary column before collapsing
+    mutate(is_omim_gene = ifelse(confidence >= 3, 1, 0)) %>% 
+    # collapse pheno and score into paired lists without duplicates
+    group_by(ensg, approved_symbol) %>% 
+    summarize(is_omim_gene = max(is_omim_gene, na.rm=T),
+              hgnc_synonyms = paste0(na.omit(hgnc), collapse=";"),
+              pheno = paste0(na.omit(pheno), collapse=";"),
+              pheno_mim  = paste0(na.omit(pheno_mim), collapse=";"),
+              confidence = paste0(na.omit(confidence), collapse=";"),
+              status = paste0(na.omit(status), collapse=";")) %>% 
+    ungroup()
+  
+  pheno_clean[pheno_clean==""] = NA
+  
+  write_tsv(pheno_clean, paste0(ref_dir, pheno2gene_clean))
+
+}
+
+# check that file is one row per gene
+pheno_clean %>% filter(ensg!="" & !is.na(ensg)) %>% group_by(ensg) %>% summarize(n=n()) %>% filter(n>1) %>% arrange(desc(n))
+
+```
+
+```{r}
+genes_full_annot = genes_full_annot %>% 
+  # dplyr::select(-pheno, -confidence) %>% 
+  left_join(pheno_clean %>% 
+              dplyr::select(gene_id=ensg, is_omim_gene, pheno, confidence, status)
+            )
+names(genes_full_annot)
+```
+
+### Open Targets
+
+```{r}
+
+opentargets=fread("/oak/stanford/groups/smontgom/shared/UDN/Analysis/ReferenceComparisonPrimary/ReferenceFiles/opentargetscores.txt")
+colnames(opentargets)<-c("top_opentargets_pheno","gene_id","top_opentargets_score","x")
+opentargets_summ = opentargets %>% 
+  dplyr::select(-x) %>% 
+  mutate(is_opentargets_gene = ifelse(top_opentargets_score >= 0.8, 1, 0),
+         top_opentargets_score = signif(top_opentargets_score, 5)) %>% 
+  # filter to high-confidence relationships
+  group_by(gene_id) %>% 
+  dplyr::filter(top_opentargets_score == max(top_opentargets_score, na.rm = T)) %>% 
+  # collapse ties
+  summarize(is_opentargets_gene = pmax(is_opentargets_gene, na.rm=T),
+            top_opentargets_pheno = paste0(unique(na.omit(top_opentargets_pheno)), collapse=";"),
+            top_opentargets_score = pmax(top_opentargets_score, na.rm = T)) %>%
+  ungroup() %>% 
+  distinct()
+
+# check for genes with multiple top entries that survived the concatenation
+opentargets_summ %>% group_by(gene_id) %>% summarize(n=n()) %>% filter(n>1) %>% arrange(desc(n))
+
+```
+
+```{r}
+
+genes_full_annot = genes_full_annot %>% 
+  # dplyr::select(-pheno, -confidence) %>% 
+  left_join(opentargets_summ)
+```
+
+### COSMIC
+
+```{r}
+
+cosmic=fread("/oak/stanford/groups/smontgom/shared/UDN/Analysis/ReferenceComparisonPrimary/ReferenceFiles/cosmic_cancer_genes.tsv")
+
+cosmic$gene_id = gsub("\\..*", "", str_extract(cosmic$Synonyms,"ENSG(.*)\\."))
+
+cosmic = cosmic[,c("Somatic","Germline","Cancer Syndrome","gene_id")] %>%
+  dplyr::filter(!is.na(gene_id))
+
+cosmic %>% filter(gene_id!="" & !is.na(gene_id)) %>% group_by(gene_id) %>% summarize(n=n()) %>% filter(n>1) %>% arrange(desc(n))
+
+```
+
+```{r}
+
+genes_full_annot = genes_full_annot %>% 
+  left_join(cosmic)
+
+```
+
+
+### ClinVar
+
+```{r}
+
+clinvar = fread("/oak/stanford/groups/smontgom/shared/UDN/ReferenceFiles/clinvar_gene_desc.txt")
+
+clinvar = clinvar %>% 
+  mutate(gene_symbol = ifelse(AssociatedGenes %in% gene_details$external_gene_name, AssociatedGenes, alias2symbol[AssociatedGenes])) %>% 
+  mutate(gene_id = hgnc_to_ensg[gene_symbol]) %>% 
+  distinct() %>% 
+  group_by(gene_id) %>% 
+  summarize(clinvar_diseases = paste0(na.omit(unique(DiseaseName)), collapse=";")) %>% 
+  ungroup() %>% 
+  mutate(is_clinvar_gene = 1)
+
+clinvar %>% filter(gene_id!="" & !is.na(gene_id)) %>% group_by(gene_id) %>% summarize(n=n()) %>% filter(n>1) %>% arrange(desc(n))
+
+```
+
+```{r}
+
+genes_full_annot = genes_full_annot %>% 
+  left_join(clinvar)
+
+```
+
+### candidate genes
+
+```{r}
+# candiate list pulled from box on Oct 24 2022
+udn_candidate_genes = fread("/oak/stanford/groups/smontgom/shared/UDN/ReferenceFiles/solved_cases_AND_candidate_dec2022.txt") %>% 
+  mutate(candiate_sample_has_rnaseq = ifelse(!is.na(RDID), 1, 0)) %>% 
+  group_by(ENSG) %>% 
+  summarize(is_candidate_gene = 1,
+            candiate_sample_has_rnaseq = max(candiate_sample_has_rnaseq, na.rm=T)) %>% 
+  dplyr::select(gene_id = ENSG, is_candidate_gene, candiate_sample_has_rnaseq) %>% 
+  distinct()
+
+genes_full_annot = genes_full_annot %>% dplyr::select(-contains("candidate")) %>% left_join(udn_candidate_genes)
+
+```
+
+# Clean up
+
+```{r}
+
+names(genes_full_annot)
+
+genes_full_annot %>% pull(eq_type.T2T) %>% unique()
+genes_full_annot %>% pull(eq_type.hg19) %>% unique()
+genes_full_annot %>% pull(eq_structure.T2T) %>% unique()
+genes_full_annot %>% pull(eq_structure.hg19) %>% unique()
+
+genes_full_annot_clean = genes_full_annot %>% 
+  # mutate(eq_type.T2T = fct_recode(eq_type.T2T, "1_to_1" = "1_to_1.sourceParalogs", 
+  #                                 "chm13_spec_paralog" = "spec_T2T.Paralogs",
+  #                                 "chm13_spec_gene" = "spec_T2T",
+  #                                 "hg38_spec_gene" = "spec_hg38",
+  #                                 "hg38_spec_gene_collapsed_in_chm13" = "spec_hg38.collapsed")) %>% 
+  # mutate(eq_type.hg19 = ifelse(eq_type.hg19 == "spec_hg38", "hg38_spec_gene", 
+  #                              ifelse(eq_type.hg19 == "spec_hg19", "hg19_spec_gene",
+  #                                     ifelse(str_detect("1_to_1", eq_type.hg19), "1_to_1", NA)))) %>% 
+  # mutate(eq_structure.T2T = fct_recode(eq_structure.T2T, "identical" = "seq_same",
+  #                                      "sequence_diff" = "seq_diff",
+  #                                      "transcript_count_diff" = "tr_diff",
+  #                                      "exon_count_diff" = "ex_diff",
+  #                                      "exon_length_diff" = "ex_length_diff")) %>% 
+  # mutate(eq_structure.hg19 = fct_recode(eq_structure.hg19, "identical" = "seq_same",
+  #                                      "sequence_diff" = "seq_diff",
+  #                                      "transcript_count_diff" = "tr_diff",
+  #                                      "exon_count_diff" = "ex_diff",
+  #                                      "exon_length_diff" = "ex_lenght_diff")) %>% 
+  mutate(gene_name = unname(ensg_to_hgnc[gene_id])) %>% 
+  mutate(build_change_chm13uniqregion = ifelse(!is.na(prop_gene_overlap_chm13uniq_vs_hg38) & prop_gene_overlap_chm13uniq_vs_hg38 > 0, 1, 0)) %>% 
+  mutate(is_cancer_gene = ifelse( (!is.na(`Cancer Syndrome`) & `Cancer Syndrome` != "") | 
+                                    (!is.na(Germline) & Germline != "") | 
+                                    (!is.na(Somatic) & Somatic != ""), 1, 0 )) %>% 
+  # clean up gene model comparisons
+  mutate(eq_structure.hg19 = ifelse(str_detect(eq_type.hg19, "spec"), NA, eq_structure.hg19)) %>% 
+  mutate(eq_structure.T2T = ifelse(str_detect(eq_type.T2T, "spec"), NA, eq_structure.T2T)) %>% 
+  dplyr::select(gene_id, gene_id_from, gene_name, 
+                starts_with("gene_id_h"), gene_id_chm13, starts_with("gene_version_"), starts_with("gene_name_"), 
+                starts_with("featChrom"),
+                hg19_hg38_annotation_comparison = eq_type.hg19,
+                hg19_hg38_gene_model_comparison = eq_structure.hg19,
+                hg19_hg38_gene_similarity = distance_gn_mean.hg19,
+                hg38_chm13_annotation_comparison = eq_type.T2T,
+                hg38_chm13_gene_model_comparison = eq_structure.T2T,
+                hg38_chm13_gene_similarity = distance_gn_mean.T2T,
+                # is_pseudogene_hg38, hg38_paralog_parentgene_hg38, has_pseudogene_hg38=has_pseudogenes_hg38,
+                chm13_novel_paralog = is_novel_paralog_chm13, # chm13_paralog_parentgene_hg38, has_pseudogene_chm13, n_pseudogenes_chm13,
+                # chm13gff_collapsed_genes, chm13gff_alt_contigs,
+                starts_with("featBiotype"),
+                num_transcripts_hg19 = transcript_nb.hg19, num_transcripts_hg38 = transcript_nb.hg38, num_transcripts_chm13 = transcript_nb.T2T,
+                num_exons_hg19 = exon_nb.hg19, num_exons_hg38 = exon_nb.hg38, num_exons_chm13 = exon_nb.T2T,
+                contains("blacklist"), ends_with("issue"), 
+                build_change_h38_hg19, build_change_chm13uniqregion, build_change_chm13_hg38_medically_relevant_genes,
+                discrep_var_hg38_hg19, 
+                is_omim_gene, omim_pheno = pheno, omim_confidence = confidence, omim_status = status,
+                is_opentargets_gene, top_opentargets_pheno, top_opentargets_score,
+                is_cancer_gene, cosmic_cancer_syndrome = `Cancer Syndrome`, cosmic_germline = Germline, cosmic_somatic = Somatic,
+                is_clinvar_gene, clinvar_pheno = clinvar_diseases, 
+                is_candidate_gene, candiate_sample_has_rnaseq
+                ) %>% 
+  distinct() %>% 
+  mutate(is_omim_gene = ifelse(is_omim_gene==1,1,0)) %>% 
+  mutate(is_opentargets_gene = ifelse(is_opentargets_gene==1,1,0)) %>% 
+  mutate(is_cancer_gene = ifelse(is_cancer_gene==1,1,0)) %>% 
+  mutate(is_clinvar_gene = ifelse(is_clinvar_gene==1,1,0)) %>% 
+  mutate(is_candidate_gene = ifelse(is_candidate_gene==1,1,0))
+
+
+genes_full_annot_clean[genes_full_annot_clean==""] <- NA
+
+genes_full_annot_clean %>% filter(gene_id!="" & !is.na(gene_id)) %>% group_by(gene_id) %>% summarize(n=n()) %>% filter(n>1) %>% arrange(desc(n))
+
+
+
+
+```
+
+
+# Save
+
+```{r}
+# save in progress
+write_tsv(genes_full_annot, "/oak/stanford/groups/smontgom/shared/UDN/Analysis/ReferenceComparisonPrimary/all_genes_annotated.updated_Oct2023.tsv")
+write_tsv(genes_full_annot_clean, "/oak/stanford/groups/smontgom/shared/UDN/Analysis/ReferenceComparisonPrimary/all_genes_annotated.updated_clean_Oct2023.tsv")
+
+rm(opentargets, opentargets_summ, pheno, pheno_clean, udn_candidate_genes, cosmic, clinvar, alias_to_symbol)
+gc()
+
+```
+
+# Alluvial Plot
+
+```{r}
+
+library(ggalluvial)
+
+genes_full_annot_clean %>% 
+  filter(!is.na(hg19_hg38_annotation_comparison)) %>% 
+  dplyr::select(gene_id, hg19_hg38_annotation_comparison, hg19_hg38_gene_model_comparison) %>% 
+  mutate(hg19_status = ifelse(hg19_hg38_annotation_comparison == "hg19_spec", "hg19_spec", hg19_hg38_gene_model_comparison)) %>% 
+  mutate(hg38_status = ifelse(hg19_hg38_annotation_comparison == "hg19_spec", "", hg19_hg38_annotation_comparison)) %>% 
+  group_by(hg19_status, hg38_status) %>% 
+  summarize(freq = n_distinct(na.omit(gene_id))) %>% 
+  
+  ggplot(aes(axis1 = hg19_status, axis2 = hg38_status, y = freq, fill = hg19_status)) +
+    geom_alluvium(curve_type = "sine") +
+    geom_stratum() +
+    geom_text(stat = "stratum",
+              aes(label = after_stat(stratum))) +
+    scale_x_discrete(limits = c("hg19_status", "hg38_status"),
+                     expand = c(0.15, 0.05)) +
+    scale_y_continuous(trans = "log10") +
+    theme_void()
+
+# , fill="#d07c10"
+```
+# Sankey Plot
+
+```{r}
+#remotes::install_github("davidsjoberg/ggsankey")
+library(ggsankey)
+
+nodes = c("Mutually Annotated", "Identical\ngene model", "Different\nexon lengths", 
+                  "Different number\nof exons", "Different number\noftranscripts",
+                  "hg19-specific", "hg38-specific")
+names(nodes) = c("1_to_1", "identical gene model", "exon_length_diff", 
+                         "exon_count_diff","transcript_count_diff","hg19_specific","hg38_specific")
+
+# prepare data
+df = genes_full_annot_clean %>% 
+  filter(!is.na(hg19_hg38_annotation_comparison) & gene_id_from %in% c("gene_id_hg19", "gene_id_hg38")) %>% 
+  dplyr::select(gene_id, hg19_hg38_annotation_comparison, hg19_hg38_gene_model_comparison) %>% 
+  mutate(hg19_status = ifelse(hg19_hg38_annotation_comparison == "hg19_specific", 
+                              "hg19_specific", hg19_hg38_gene_model_comparison)) %>% 
+  mutate(hg38_status = ifelse(hg19_hg38_annotation_comparison == "hg19_specific", NA, hg19_hg38_annotation_comparison)) %>% 
+  make_long(hg19_status, hg38_status) %>% 
+  filter(!is.na(node))
+
+df = df %>% 
+  mutate(node = factor(node, levels = names(nodes), ordered=T)) %>% 
+  mutate(next_node = factor(next_node, levels = names(nodes), ordered=T))
+
+# calculate totals
+dagg <- df %>%
+  dplyr::group_by(node) %>%
+  tally()
+
+# combine data
+df2 <- merge(df, dagg, by.x = 'node', by.y = 'node', all.x = TRUE)
+
+ggplot(df2, aes(x = x, 
+               next_x = next_x, 
+               node = node, 
+               next_node = next_node,
+               fill = factor(x),
+               label = paste0(nodes[node]," (", scales::comma(n), ")"))) +
+  geom_sankey(flow.alpha = 0.5,
+              flow.fill = "#d07c10",
+              width = 0.1,
+              na.rm	= T,
+              node.color = "black",
+              show.legend = FALSE) +
+    geom_sankey_label(size = 3, color = "black", fill= "white", hjust = 0) +
+    scale_fill_manual(values = c("#8C1515", "#dea700")) +
+    # scale_y_continuous(trans = "log10") +
+    theme_sankey(base_size = 16)
+
+
+```
+
+# Tissue-level annotations
+
+### Expression
+
+```{r}
+
+genes_full_annot_clean = fread("/oak/stanford/groups/smontgom/shared/UDN/Analysis/ReferenceComparisonPrimary/all_genes_annotated.updated_clean_Oct2023.tsv")
+
+```
+
+```{r}
+# load expression data
+format_expression_file <- function(filename, build){
+  tissue = basename(filename) %>% str_remove("\\..*")
+  df = fread(filename)
+  colnames(df) = c("sample", "gene_id", "transcripts", "tpm")
+  df = df %>% 
+    mutate(gene_id = str_remove(gene_id, "\\..*")) %>% 
+    group_by(gene_id) %>% 
+    summarize(n_samples_expressed = n_distinct(sample[tpm>=0.1]),
+              mean_tpm_expressed = mean(tpm[tpm>=0.1], na.rm=T),
+              median_tpm_expressed = median(tpm[tpm>=0.1], na.rm=T)) %>% 
+    mutate(tissue = !!tissue) %>% 
+    dplyr::select(gene_id, tissue, n_samples_expressed, mean_tpm_expressed, median_tpm_expressed)
+  colnames(df) = c(paste0("gene_id_", build), "tissue", paste0("n_samples_expressed_", build), 
+                    paste0("mean_tpm_expressed_", build), paste0("median_tpm_expressed_", build),
+                   "tissue")
+  
+  return(df)
+}
+
+
+load_expression <- function(build){
+  ref_dir=paste0("/oak/stanford/groups/smontgom/shared/UDN/Output/", build, "/eOutliers")
+  files = list.files(path=ref_dir, pattern = paste0(".*", build, ".dedupOptical_minMQ255_rsem.genes.results"), full.names = T)
+  
+  for(file in files){
+    tissue = basename(file) %>% str_remove("\\..*")
+    if(tissue %in% c("Blood", "Fibroblast", "iPS", "iPSC_NPC", "Muscle", "PBMC")){
+      dat = format_expression_file(file, build)
+      all_tissues = rbind(if(exists("all_tissues")) all_tissues, dat)
+    }
+  }
+  
+  return(all_tissues)
+  
+}
+
+samples_per_tissue = c(283,66,12,11,8,6)
+names(samples_per_tissue) <- c("Blood", "Fibroblast", "PBMC", "Muscle", "iPS", "iPSC_NPC")
+
+tpm_hg19 = load_expression("hg19")
+tpm_hg38 = load_expression("hg38")
+tpm_chm13 = load_expression("chm13")
+
+gc()
+```
+
+```{r}
+# format expression data
+head(tpm_hg19)
+tpm_hg19_wide = tpm_hg19 %>% 
+  gather(key = "key", value = "value", -gene_id_hg19, -tissue) %>% 
+  unite(tissue, key, col = "newkey", sep=".") %>% 
+  spread(key = newkey, value = value)
+  
+tpm_hg38_wide = tpm_hg38 %>% 
+  gather(key = "key", value = "value", -gene_id_hg38, -tissue) %>% 
+  unite(tissue, key, col = "newkey", sep=".") %>% 
+  spread(key = newkey, value = value)
+
+tpm_chm13_wide = tpm_chm13 %>% 
+  gather(key = "key", value = "value", -gene_id_chm13, -tissue) %>% 
+  unite(tissue, key, col = "newkey", sep=".") %>% 
+  spread(key = newkey, value = value)
+
+# merge expression data
+genes_full_annot2 = genes_full_annot_clean %>% 
+  left_join(tpm_hg19_wide, by = "gene_id_hg19", multiple = "all") %>% 
+  left_join(tpm_hg38_wide, by = "gene_id_hg38", multiple = "all") %>% 
+  left_join(tpm_chm13_wide, by = "gene_id_chm13", multiple = "all") %>% 
+  gather(key = "key", value = "v", Blood.mean_tpm_expressed_hg19:PBMC.n_samples_expressed_chm13) %>% 
+  separate(key, into = c("tissue", "k"), sep="\\.") %>% 
+  spread(key = k, value = v) %>% 
+  mutate(is_expressed_30pct_hg19 = ifelse(n_samples_expressed_hg19/unname(samples_per_tissue[tissue])>=0.3, 1, 0),
+         is_expressed_30pct_hg38 = ifelse(n_samples_expressed_hg38/unname(samples_per_tissue[tissue])>=0.3, 1, 0),
+         is_expressed_30pct_chm13 = ifelse(n_samples_expressed_chm13/unname(samples_per_tissue[tissue])>=0.3, 1, 0)) %>% 
+  distinct()
+
+
+gc()
+```
+
+```{r}
+# check if any genes have more than one row per tissue (n=6 tissues)
+genes_full_annot2 %>% group_by(gene_id) %>% summarize(n=n()) %>% filter(n>6) %>% arrange(desc(n))
+
+genes_full_annot_clean %>% filter(gene_id_hg38 == "ENSG00000000003")
+genes_full_annot2 %>% filter(gene_id_hg38 == "ENSG00000000003") %>% distinct()
+
+genes_full_annot2 %>% 
+  dplyr::select(gene_id_hg38, gene_id_chm13, hg38_chm13_annotation_comparison, tissue, n_samples_expressed_hg38, n_samples_expressed_chm13) %>% 
+  group_by(tissue, hg38_chm13_annotation_comparison) %>% 
+  summarize(n_genes_expressed_hg38 = n_distinct(na.omit(gene_id_hg38[n_samples_expressed_hg38 > 0 & hg38_chm13_annotation_comparison != "chm13_spec_paralog"])),
+            n_genes_expressed_chm13 = n_distinct(na.omit(gene_id_chm13[n_samples_expressed_chm13 > 0])))
+
+
+
+```
+
+### Multimapping
+
+```{r}
+
+format_multimapping_file <- function(filename, build){
+  tissue = str_remove(filename, ".*mapping_[a-z0-9]+_") %>% str_remove("_allsamples.*")
+  df = fread(filename)
+  colnames(df)[1] = c("gene_id")
+  df = df %>% 
+    filter(!str_detect(gene_id, "PAR_Y")) %>% 
+    mutate(gene_id = ifelse(str_detect(gene_id, "^ENSG"), str_remove(gene_id, "\\..*"), gene_id)) %>% 
+    # rename(mean_reads = mean_num_counts) %>%
+    mutate(prop_mean_multimapped = mean_multi_mapped / mean_num_counts) %>% 
+    gather(key = "key", value = "value", -gene_id, -build) %>% 
+    unite(col = "new_key", key, build) %>% 
+    spread(key = new_key, value = value) %>% 
+    mutate(tissue = !!tissue)
+  colnames(df)[1] = c(paste0("gene_id_", build))
+  
+  return(df)
+}
+
+load_multimapping <- function(build){
+  ref_dir="/oak/stanford/groups/smontgom/shared/UDN/Analysis/ReferenceComparisonPrimary/Mapping"
+  
+  if(build %in% c("hg19", "hg38")){
+    files = list.files(path=ref_dir, pattern = paste0("mapping_", build, "_.*_allsamples_totals_meangene.txt.gz"), full.names = T)
+  } else if (build == "chm13") {
+    files = list.files(path=ref_dir, pattern = "mapping_chm13_.*_allsamples_totals_meangene_CHM13ID.txt.gz", full.names = T)
+  }
+  
+  for(file in files){
+    dat = format_multimapping_file(file, build)
+    all_tissues = rbind(if(exists("all_tissues")) all_tissues, dat)
+  }
+  
+  return(all_tissues)
+  
+}
+
+mm_hg19 = load_multimapping("hg19")
+mm_hg38 = load_multimapping("hg38")
+mm_chm13 = load_multimapping("chm13")
+
+genes_full_annot3 = genes_full_annot2 %>% 
+  left_join(mm_hg19) %>% 
+  left_join(mm_hg38) %>% 
+  left_join(mm_chm13)
+
+genes_full_annot3 = genes_full_annot3 %>% 
+  mutate(`diff_mean_prop_multimapped.chm13_hg38` = (prop_mean_multimapped_chm13) - (prop_mean_multimapped_hg38),
+         `diff_mean_prop_multimapped.hg38_hg19` = (prop_mean_multimapped_hg38) - (prop_mean_multimapped_hg19))
+
+
+genes_full_annot3 %>% ggplot(aes(x = diff_mean_prop_multimapped.hg38_hg19)) + geom_histogram() + scale_x_continuous(trans="log10", labels = scales::scientific)
+genes_full_annot3 %>% ggplot(aes(x = diff_mean_prop_multimapped.chm13_hg38)) + geom_histogram() + scale_x_continuous(trans="log10", labels = scales::scientific)
+
+```
+
+
+
+### Diff exp
+
+```{r}
+merged_long = fread("/oak/stanford/groups/smontgom/shared/UDN/Analysis/ReferenceComparisonPrimary/final_diffquant_table.txt.gz") %>% 
+  dplyr::select(`logFC_chm13_hg38` = logFC_chm13ensembl_vs_hg38,
+                `logFC_hg38_hg19` = logFC_hg38_vs_hg19,
+                `adj_pval_chm13_hg38` = adj.P.Val_chm13ensembl_vs_hg38,
+                `adj_pval_hg38_hg19` = adj.P.Val_hg38_vs_hg19,
+                gene_id = ensg, tissue)
+
+# ensure that missing is NA
+merged_long[merged_long==""] = NA
+
+dim(merged_long)
+head(merged_long)
+
+# check for gene_ids
+merged_long %>% pull(gene_id) %>% n_distinct()
+merged_long %>% filter(gene_id %notin% genes_full_annot$gene_id) %>% pull(gene_id) %>% n_distinct() # 40 out of 31,494 distinct gene_ids are not in the genes_full_annot gene_id list
+
+merged_long %>% filter(gene_id %notin% genes_full_annot$gene_id) %>% pull(gene_id) %>% unique()
+
+merged_long %>% filter(gene_id %notin% genes_full_annot$gene_id & gene_id %in% genes_full_annot$gene_id_hg19) %>% pull(gene_id) %>% n_distinct() # 0 of these 40 are in the hg19 gene_id list
+merged_long %>% filter(gene_id %notin% genes_full_annot$gene_id & gene_id %in% genes_full_annot$gene_id_hg38) %>% pull(gene_id) %>% n_distinct() # 0 of these 40 are in the hg38 gene_id list
+
+# spot checking the ensg IDs suggests there are likely chrY genes
+
+```
+
+```{r}
+
+genes_full_annot4 = genes_full_annot3 %>% 
+  left_join(merged_long, multiple = "all") %>% 
+  distinct()
+
+genes_full_annot4 %>% distinct() %>% group_by(gene_id) %>% summarize(n=n()) %>% filter(n>6) %>% arrange(desc(n))
+genes_full_annot4 %>% filter(gene_id == "ENSG00000147130")
+
+genes_full_annot4 %>% 
+  filter(tissue=="Blood" & adj_pval_chm13_hg38<=0.05 & abs(logFC_chm13_hg38)>=1) %>% 
+  pull(gene_id) %>% n_distinct()
+
+genes_full_annot4 %>% 
+  filter(tissue=="Blood" & adj_pval_chm13_hg38<=0.05 & abs(logFC_chm13_hg38)>=1 & median_tpm_expressed_chm13 < median_tpm_expressed_hg38) %>% 
+  pull(gene_id) %>% n_distinct()
+
+```
+
+### Zscores
+
+```{r}
+# loading function
+z_tissues = c("Blood", "Fibroblast")
+
+load_zscores <- function(tissue, build1, build2){
+  build1_clean = str_remove(build1, "ensembl")
+  build2_clean = str_remove(build2, "ensembl")
+  
+  zdir = "/oak/stanford/groups/smontgom/shared/UDN/Analysis/ReferenceComparisonPrimary/TPMDifferences/"
+  zscores = paste0(zdir, tissue, ".dedupOptical_minMQ255.zscores_genesdiff.", 
+                 build2, ".", build1, ".txt.gz")
+  
+  z = fread(zscores) %>% 
+    rename(gene_id = gene) %>% 
+    rename_at(.vars = vars(starts_with("z")),
+              .funs = funs(str_remove(., "^z_"))) %>% 
+    mutate(ensg = str_remove(gene_id, "\\..*")) %>% 
+    mutate(tissue = !!tissue) %>% 
+    mutate(outlier_change_z3_diff05 = ifelse( (abs(!!as.name(build1_clean)) >= 3 & 
+                                   abs(!!as.name(build2_clean)) < 3 &
+                                   abs(diff) >= 0.5) | 
+                                    (abs(!!as.name(build2_clean)) >= 3 & 
+                                   abs(!!as.name(build1_clean)) < 3 &
+                                   abs(diff) >= 0.5), 1, 0),
+           outlier_change_z3z1 = ifelse( (abs(!!as.name(build1_clean)) >= 3 & 
+                                   abs(!!as.name(build2_clean)) < 1) | 
+                                    (abs(!!as.name(build2_clean)) >= 3 & 
+                                   abs(!!as.name(build1_clean)) < 1), 1, 0),
+           abs_zdiff = abs(!!as.name(build1_clean) - !!as.name(build2_clean))
+           )
+    
+  return(z)
+  
+}
+
+# load hg38 vs hg19
+build1="hg38"
+build2="hg19"
+for( tissue in z_tissues ){
+  df = load_zscores(tissue, build1, build2)
+  z_long = rbind(if(exists("z_long")) z_long, df)
+  rm(df)
+}
+
+# z_long %>% pull(tissue) %>% unique()
+
+z_sum1 = z_long %>% 
+  # gather(key = "build", value = "zscore", -gene, -gene_id, -sample_id) %>% 
+  group_by(ensg, tissue) %>% 
+  summarize(outliers_z3diff05_hg38_hg19 = sum(outlier_change_z3_diff05, na.rm=T),
+            outliers_z3diff05_hg38_hg19_samples = paste0(na.omit(sample_id[outlier_change_z3_diff05==1]), collapse=","),
+            outliers_z3z1_hg38_hg19 = sum(outlier_change_z3z1, na.rm=T),
+            outliers_z3z1_hg38_hg19_samples = paste0(na.omit(sample_id[outlier_change_z3z1==1]), collapse=","),
+            mean_abs_zdiff_hg38_hg19 = mean(abs_zdiff, na.rm=T)) %>% 
+  
+  mutate(outliers_z3diff05_hg38_hg19_samples = ifelse( outliers_z3diff05_hg38_hg19_samples == "", 
+                                                       NA, outliers_z3diff05_hg38_hg19_samples),
+         outliers_z3z1_hg38_hg19_samples = ifelse( outliers_z3z1_hg38_hg19_samples == "", 
+                                                   NA, outliers_z3z1_hg38_hg19_samples))
+
+
+arrange(z_sum1, desc(outliers_z3diff05_hg38_hg19)) %>% head()
+z_sum1 %>% 
+  ggplot(aes(x = outliers_z3diff05_hg38_hg19, y = outliers_z3z1_hg38_hg19)) +
+  geom_point()
+
+z_sum1 %>% 
+  ggplot(aes(x = mean_abs_zdiff_hg38_hg19)) +
+  geom_histogram() +
+  scale_x_continuous(trans="log10")
+
+# now load t2t vs hg38
+build1="chm13ensembl"
+build2="hg38"
+rm(z_long)
+for( tissue in z_tissues ){
+  df = load_zscores(tissue, build1, build2)
+  z_long = rbind(if(exists("z_long")) z_long, df)
+  rm(df)
+}
+
+# z_long %>% pull(tissue) %>% unique()
+
+z_sum2 = z_long %>% 
+  # gather(key = "build", value = "zscore", -gene, -gene_id, -sample_id) %>% 
+  group_by(ensg, tissue) %>% 
+  summarize(outliers_z3diff05_chm13_hg38 = sum(outlier_change_z3_diff05, na.rm=T),
+            outliers_z3diff05_chm13_hg38_samples = paste0(na.omit(sample_id[outlier_change_z3_diff05==1]), collapse=","),
+            outliers_z3z1_chm13_hg38 = sum(outlier_change_z3z1, na.rm=T),
+            outliers_z3z1_chm13_hg38_samples = paste0(na.omit(sample_id[outlier_change_z3z1==1]), collapse=","),
+            mean_abs_zdiff_chm13_hg38 = mean(abs_zdiff, na.rm=T))
+
+z_sum2 %>% 
+  ggplot(aes(x = mean_abs_zdiff_chm13_hg38)) +
+  geom_histogram() +
+  scale_x_continuous(trans="log10")
+
+arrange(z_sum2, desc(outliers_z3diff05_chm13_hg38)) %>% head()
+
+z_sum = full_join(z_sum1,z_sum2) %>% rename(gene_id = ensg)
+head(z_sum %>% arrange(desc(outliers_z3diff05_hg38_hg19)))
+
+# write_tsv(z_long, paste0(savedir, "all_z_tissues.z_score_changes.", build1, "_vs_", build2, ".txt"))
+# write_tsv(z_sum, paste0(savedir, "all_z_tissues.z_score_changes.", build1, "_vs_", build2, ".summary.txt"))
+
+# rm(z_sum1, z_sum2, z_long)
+gc()
+```
+
+```{r}
+# QC check: how many genes have multiple rows?
+z_sum %>% group_by(gene_id) %>% filter(n() > 2)
+
+# how many gene_ids in the outlier file are not in our current master table?
+genes = genes_full_annot$gene_id %>% unique()
+z_sum %>% filter(gene_id %notin% genes) %>% pull(gene_id) %>% n_distinct() # 45
+z_sum %>% filter(gene_id %notin% genes) %>% pull(gene_id) %>% unique()
+z_sum %>% filter(gene_id %notin% genes_full_annot$gene_id & 
+                   gene_id %notin% genes_full_annot$gene_id_hg19 & 
+                   gene_id %notin% genes_full_annot$gene_id_hg38) %>% 
+  pull(gene_id) %>% 
+  unique() # 3
+
+```
+
+```{r}
+# complete the merge! (dropping Y chromosomes)
+genes_full_annot5 = genes_full_annot4 %>% 
+  left_join(z_sum %>% filter(gene_id %notin% chrY_genes$ensembl_gene_id)) %>% 
+  distinct()
+
+```
+
+# Save
+
+```{r}
+
+
+# save in progress
+write_tsv(genes_full_annot5, "/oak/stanford/groups/smontgom/shared/UDN/Analysis/ReferenceComparisonPrimary/all_genes_annotated_stupid_big.diffexp.mappingstats.outliers.updated_Oct2023.tsv")
+
+```
+
+# Summary table
+
+```{r}
+
+genes_full_annot5 %>% 
+  mutate(diff_gene_version = ifelse(str_remove(gene_version_hg19, "_.*") != gene_version_hg38, 1, 0)) %>% 
+  mutate(is_medically_relevant = ifelse(is_opentargets_gene==1 | is_omim_gene==1 | is_clinvar_gene==1 | is_cancer_gene==1 | is_candidate_gene==1, 1, 0)) %>% 
+  mutate(is_diff_exp = ifelse(abs(logFC_hg38_hg19) >= 1 & adj_pval_hg38_hg19<0.05, 1, 0)) %>% 
+  dplyr::select(gene_id, gene_id_from, gene_name,
+                gene_version_hg38, gene_version_hg19, diff_gene_version,
+                starts_with("hg19_hg38"),
+                hg19_blacklist_reason, hg19_issue, hg38_blacklist_reason, hg38_issue,
+                build_change_h38_hg19, 
+                is_medically_relevant, starts_with("is_"),
+                diff_mean_prop_multimapped.hg38_hg19, 
+                logFC_hg38_hg19, adj_pval_hg38_hg19, 
+                outliers_z3z1_hg38_hg19, outliers_z3z1_hg38_hg19_samples,
+                outliers_z3diff05_hg38_hg19, outliers_z3diff05_hg38_hg19_samples) %>% 
+  filter(is_medically_relevant==1 & is_diff_exp==1 & outliers_z3diff05_hg38_hg19>0)
+  # filter(is_medically_relevant==1 & is_diff_exp==1 & outliers_z3z1_hg38_hg19>0)
+
+  
+
+```
+
+
+```{r}
+main_table=genes_full_annot5
+
+main_table_short = main_table %>% 
+  
+  # remove excess columns
+  dplyr::select(-starts_with("num_"), -"omim_confidence", -"omim_status", -contains("pseudogene"), -contains("paralog"),
+                -contains("_tpm_expressed_"), -starts_with("n_samples_expressed"),
+                -contains("_num_counts_"), -contains("_mapped_"), -starts_with("prop_mean_multi"), 
+                -starts_with("outliers_z3diff05"), -starts_with("mean_abs_zdiff"), 
+                -ends_with("_samples")) %>% 
+  
+  # clean up annotation_comparison label for events missing one
+  mutate(hg19_hg38_annotation_comparison = ifelse(gene_name_hg19 == gene_name_hg38 & is.na(hg19_hg38_annotation_comparison),
+                                                  "1_to_1", hg19_hg38_annotation_comparison) %>% 
+  
+  # create expressed tissue placeholder columns to summarize on
+  mutate(hg19_expressed_tissue = ifelse(is_expressed_30pct_hg19 == 1, tissue, NA)) %>%
+  mutate(hg38_expressed_tissue = ifelse(is_expressed_30pct_hg38 == 1, tissue, NA)) %>%
+  mutate(chm13_expressed_tissue = ifelse(is_expressed_30pct_chm13 == 1, tissue, NA)) %>%
+  
+  # clean up hg38 vs chm13 annotation comparison
+  mutate(hg38_chm13_annotation_comparison = 
+           ifelse(str_detect(hg38_chm13_annotation_comparison, "hg38"), "hg38_spec_gene",
+                  ifelse(str_detect(hg38_chm13_annotation_comparison,"chm13"), "chm13_spec_gene", 
+                         hg38_chm13_annotation_comparison))) %>% 
+  
+  # annotation-specific event
+  mutate(hg19_hg38.annotation_specific =ifelse(hg19_hg38_annotation_comparison == "hg19_spec_gene", "hg19",
+                                               ifelse(hg19_hg38_annotation_comparison == "hg38_spec_gene", "hg38",
+                                                      NA))) %>% 
+  mutate(hg38_chm13.annotation_specific =ifelse(hg38_chm13_annotation_comparison == "chm13_spec_gene", "chm13",
+                                               ifelse(hg38_chm13_annotation_comparison == "hg38_spec_gene", "hg38",
+                                                      NA))) %>% 
+  mutate(is_annotation_specific = ifelse(!is.na(hg19_hg38.annotation_specific) | 
+                                           !is.na(hg38_chm13.annotation_specific), 1, 0)) %>% 
+  
+  # note build-exclusive events for easier summarizing
+  mutate(build_exclusive_hg19_hg38 = ifelse(is_expressed_30pct_hg19 == 1 & is_expressed_30pct_hg38 == 0, "hg19",
+                                            ifelse(is_expressed_30pct_hg19 == 0 & is_expressed_30pct_hg38 == 1, 
+                                                   "hg38", NA))) %>% 
+  mutate(build_exclusive_hg38_chm13 = ifelse(is_expressed_30pct_chm13 == 1 & is_expressed_30pct_hg38 == 0, "chm13",
+                                            ifelse(is_expressed_30pct_chm13 == 0 & is_expressed_30pct_hg38 == 1, 
+                                                   "hg38", NA))) %>% 
+  mutate(build_exclusive_tissue = ifelse(!is.na(build_exclusive_hg19_hg38) | !is.na(build_exclusive_hg38_chm13), 
+                                         tissue, NA)) %>% 
+  
+  # create diff_exp tissue placeholder columns to summarize on
+  mutate(hg19_hg38_diffquant_tissue = ifelse(adj_pval_hg38_hg19 < 0.05, tissue, NA)) %>% 
+  mutate(hg38_chm13_diffquant_tissue = ifelse(adj_pval_chm13_hg38 < 0.05, tissue, NA)) %>% 
+  
+  # summarize results across all tissues
+  group_by(across(c(-contains("tissue"), -starts_with("is_expressed_"), 
+                    -starts_with("diff_mean_prop_multimapped"), 
+                    -starts_with("logFC"), -starts_with("adj_pval"), 
+                    -starts_with("outliers"), -starts_with("mean_abs_zdiff")
+                    ))) %>% 
+  summarise(hg19.expressed_tissues = ifelse(sum(!is.na(unique(hg19_expressed_tissue))) > 1,
+                                               paste0(unique(na.omit(hg19_expressed_tissue)), collapse=", "), 
+                                               hg19_expressed_tissue),
+            
+            hg38.expressed_tissues = ifelse(sum(!is.na(unique(hg38_expressed_tissue))) > 1,
+                                               paste0(unique(na.omit(hg38_expressed_tissue)), collapse=", "), 
+                                               hg38_expressed_tissue),
+            
+            chm13.expressed_tissues = ifelse(sum(!is.na(unique(chm13_expressed_tissue))) > 1,
+                                               paste0(unique(na.omit(chm13_expressed_tissue)), collapse=", "), 
+                                               chm13_expressed_tissue), 
+            # is_annotation_specific = is_annotation_specific,
+            # annotation_specific = annotation_specific,
+            # build-exclusive expression events
+            is_build_exclusive = ifelse(any(!is.na(build_exclusive_hg38_chm13)) | 
+                                          any(!is.na(build_exclusive_hg19_hg38)), 1, 0), 
+            
+            hg19_hg38.build_exclusive = ifelse(sum(!is.na(unique(build_exclusive_hg19_hg38))) > 1,
+                                               paste0(unique(na.omit(build_exclusive_hg19_hg38)), collapse=", "), 
+                                               unique(build_exclusive_hg19_hg38)),
+            
+            hg38_chm13.build_exclusive = ifelse(sum(!is.na(unique(build_exclusive_hg38_chm13))) > 1,
+                                                paste0(unique(na.omit(build_exclusive_hg38_chm13)), collapse=", "), 
+                                                unique(build_exclusive_hg38_chm13)),
+            
+            # differential quantification events
+            hg19_hg38.is_diffquant = ifelse(any(adj_pval_hg38_hg19 < 0.05), 1, 0),
+            
+            hg19_hg38.diffquant_tissues = ifelse(sum(!is.na(unique(hg19_hg38_diffquant_tissue))) > 1,
+                                                 paste0(unique(na.omit(hg19_hg38_diffquant_tissue)), collapse=", "), 
+                                                 unique(hg19_hg38_diffquant_tissue)),
+            
+            hg38_chm13.is_diffquant = ifelse(any(adj_pval_chm13_hg38 < 0.05), 1, 0),
+            hg38_chm13.diffquant_tissues = ifelse(sum(!is.na(unique(hg38_chm13_diffquant_tissue))) > 0,
+                                                  paste0(na.omit(hg38_chm13_diffquant_tissue), collapse=", "), 
+                                                  unique(hg38_chm13_diffquant_tissue))
+            # difference in multimapping rates
+            )
+
+# clean up feature BioType details
+reg_rna = c("snRNA", "snoRNA", "scaRNA", "siRNA", "miRNA", "piRNA", "vault_RNA", "scRNA", "sRNA")
+housekeeping_rna = c("tRNA", "rRNA", "Mt_tRNA", "Mt_rRNA", "ribozyme")
+func_rna = c(housekeeping_rna, reg_rna)
+t2t_spec = c("antisense", "sense_intronic", "processed_transcript",
+             "sense_overlapping", "StringTie")
+
+
+main_table_short = main_table_short %>% 
+  mutate(featBiotype = ifelse(!is.na(featBiotype.hg38), featBiotype.hg38,
+                              ifelse(!is.na(featBiotype.T2T), featBiotype.T2T, featBiotype.hg19))) %>% 
+  mutate(featBiotype_clean = ifelse(featBiotype == "protein_coding", "Protein Coding",
+       ifelse(featBiotype %in% c("lncRNA", "lincRNA"), "lncRNA",
+       ifelse(featBiotype == "misc_RNA", "miscRNA",
+       ifelse(str_detect(featBiotype, "pseudogene"), "Pseudogene",
+       ifelse(str_detect(featBiotype, "IG|TR"), "Ig/T-Cell Receptor Gene",
+       ifelse(featBiotype %in% func_rna, "Functional non-coding RNA",
+       ifelse(featBiotype == "TEC", "Unconfirmed (TEC)",
+       ifelse(featBiotype %in% t2t_spec, "Uncharacterized CHM13 Gene", featBiotype))))))))
+       ) %>% 
+  mutate(featBiotype_clean = factor(featBiotype_clean, ordered=T,
+                              levels = c("Protein Coding", 
+                                         "lncRNA", 
+                                         "Ig/T-Cell Receptor Gene", 
+                                         "Functional non-coding RNA", 
+                                         "Pseudogene", 
+                                         "miscRNA",
+                                         "Uncharacterized CHM13 Gene",
+                                         "Unconfirmed (TEC)"
+                                         )))
+
+main_table_short %>% pull(featBiotype) %>% unique()
+print("")
+main_table_short %>% pull(featBiotype_clean) %>% unique()
+
+
+```
+# --
+# Compare Biotypes
+
+```{r fig.height=6, fig.width=5}
+
+names(main_table_short)
+
+for_plot = main_table_short  %>% 
+  ungroup() %>% 
+  # preselect annotation-specific genes and needed columns
+  filter(!is.na(hg19_hg38.annotation_specific) | !is.na(hg38_chm13.annotation_specific)) %>% 
+  dplyr::select(ends_with(".annotation_specific"), featBiotype_clean, gene_id, ends_with("expressed_tissues")) %>% 
+  # extract comparison and build info
+  gather(key = "comparison", value = "build", hg19_hg38.annotation_specific, hg38_chm13.annotation_specific) %>% 
+  mutate(comparison = comparison %>% str_remove("\\.annotation_specific") %>% str_replace("_",":")) %>% 
+  mutate(build = factor(build, ordered=T, levels=c("hg19", "hg38", "chm13"))) %>% 
+  # extract expression info per build
+  gather(key = "build_exp", value = "expressed_tissues", ends_with("expressed_tissues")) %>% 
+  mutate(build_exp = build_exp %>% str_remove("\\.expressed_tissues")) %>% 
+  # filter to build-specific genes expressed in their respective build
+  filter(!is.na(build)) %>% 
+  filter(build == build_exp & !is.na(expressed_tissues))
+  
+# numbers of annot-spec genes are correct BUT number with detected expression are below what is reported in text 
+# comparison  build  text here
+# hg19:hg38   hg19   169  131
+# hg19:hg38   hg38   14   11
+# hg38:chm13  hg38   68   58
+# hg38:chm13  chm13  335  236
+
+for_plot %>%
+  group_by(comparison, build) %>% 
+  summarize(n = n_distinct(gene_id))
+
+hg38_annot_spec = for_plot %>% filter(build=="hg38") %>% pull(gene_id) %>% unique()
+main_table_short %>% filter(gene_id %in% hg38_annot_spec) %>% 
+  filter(is_omim_gene==1 | is_opentargets_gene==1 | is_cancer_gene==1 | is_clinvar_gene==1)
+
+for_plot %>% 
+  group_by(comparison, build, featBiotype_clean) %>% 
+  summarize(n = n_distinct(gene_id)) %>% 
+  ungroup() %>% 
+  ggplot(aes(x = build, y = n, fill = featBiotype_clean)) +
+    geom_col(position = "fill", color = "white") +
+    scale_fill_manual(values = c("#e0338b", "#f4acca", "#febb02", "#2fa45e", 
+                                 "#71f0e9", "#01c8cf", "#229abf", "#c475c4"),
+                      name = "") +
+    guides(fill=guide_legend(ncol=2)) +
+    scale_y_continuous(name = "Proportion of expressed\nannotation-specific genes") +
+    facet_wrap(~comparison, scales = "free_x") +
+    theme_bw(base_size=50) +
+    theme(axis.title.x = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.grid.major.x = element_blank(),
+          legend.position = "bottom",
+          panel.background = element_rect(fill='transparent'), #transparent panel bg
+          plot.background = element_rect(fill='transparent', color=NA), #transparent plot bg
+          )
+
+```
+
+# Reasons 
+
+## Stats
+
+### hg38:hg19
+
+```{r}
+
+
+tmp_hg19 = main_table %>% 
+  filter(abs(logFC_hg38_hg19) >= 1 & adj_pval_hg38_hg19<0.05) %>% 
+  # mutate(diff_version = ifelse(str_remove(gene_version_hg19, "_.*") != gene_version_hg38, 1, NA)) %>% 
+  mutate(annot_diff = ifelse(hg19_hg38_gene_model_comparison %in% c("exon_count_diff", "transcript_count_diff"), 1, 0)) %>% 
+  mutate(build_change = ifelse(hg19_hg38_gene_model_comparison %in% c("exon_length_diff", "sequence_diff") | !is.na(build_change_h38_hg19), 1, 0 )) %>% 
+  mutate(multimap_diff = ifelse(abs(diff_mean_prop_multimapped.hg38_hg19) > 0.01, 1, 0)) %>% 
+  mutate(multimap_diff = ifelse(is.na(multimap_diff), 0, multimap_diff)) %>% 
+  mutate(other_build_issues = ifelse(!is.na(hg19_blacklist_reason) | !is.na(hg19_issue), 1, 0)) %>% 
+  mutate(hg38_issues = ifelse(!is.na(hg38_blacklist_reason) | !is.na(hg38_issue), 1, 0)) %>%
+  mutate(both_issues = ifelse(hg38_issues==1 & other_build_issues==1, 1, 0)) %>%
+  dplyr::select(gene_id, gene_id_from, gene_name, tissue, logFC_hg38_hg19, adj_pval_hg38_hg19, 
+                # diff_version, 
+                annot_diff, build_change, other_build_issues, hg38_issues, both_issues, multimap_diff)
+
+# number of diff quant genes explained by issue OR something else
+tmp_hg19 %>% rbind(
+  tmp_hg19 %>% 
+    mutate(tissue = "Union",
+           logFC_hg38_hg19 = NA,
+           adj_pval_hg38_hg19 = NA) %>% 
+    # get max mutlimap level
+    group_by(across(c(-multimap_diff))) %>% 
+    summarize(multimap_diff = max(multimap_diff, na.rm = T)) %>% 
+    ungroup() %>% 
+    distinct()
+) %>% filter(tissue=="Union", multimap_diff==0 & hg38_issues==0 & other_build_issues==0 & annot_diff==0 & build_change==0) #filter(gene_id %in% c('ENSG00000269900', 'ENSG00000259001')) %>% 
+  mutate(tissue = factor(tissue, ordered=T,
+                         levels = c("Blood", "Fibroblast", "PBMC", "Muscle", "iPS", "iPSC_NPC", "Union"))) %>% 
+  group_by(tissue) %>% 
+  summarize(sig = n_distinct(na.omit(gene_id)),
+            hg19_issue = n_distinct(na.omit(gene_id[other_build_issues==1 & hg38_issues==0])),
+            hg38_issue = n_distinct(na.omit(gene_id[hg38_issues==1 & other_build_issues==0])),
+            both_issue = n_distinct(na.omit(gene_id[hg38_issues==1 & other_build_issues==1])),
+            no_issue = n_distinct(na.omit(gene_id[hg38_issues==0 & other_build_issues==0])),
+            annot_change = n_distinct(na.omit(gene_id[annot_diff==1 & build_change==0 & hg38_issues==0 & other_build_issues==0])),
+            annot_and_build = n_distinct(na.omit(gene_id[annot_diff==1 & build_change==1 & hg38_issues==0 & other_build_issues==0])),
+            build_change = n_distinct(na.omit(gene_id[annot_diff==0 & build_change==1 & hg38_issues==0 & other_build_issues==0])),
+            mm_diff = n_distinct(na.omit(gene_id[multimap_diff==1 & hg38_issues==0 & other_build_issues==0])))
+
+tmp_hg19 %>% filter(multimap_diff==0 & hg38_issues==0 & other_build_issues==0 & annot_diff==0 & build_change==0) %>% pull(gene_id) %>% n_distinct()
+tmp_hg19 %>% filter(multimap_diff==0 & hg38_issues==0 & other_build_issues==0 & annot_diff==0 & build_change==0) %>% arrange(gene_id)
+
+```
+
+
+### chm13:hg38
+
+```{r}
+
+tmp_chm13 = main_table %>% 
+  filter(abs(logFC_chm13_hg38) >= 1 & adj_pval_chm13_hg38<0.05) %>% 
+  mutate(annot_diff = ifelse(hg38_chm13_gene_model_comparison %in% c("exon_count_diff", "transcript_count_diff"), 1, 0)) %>% 
+  mutate(build_change = ifelse(hg38_chm13_gene_model_comparison %in% c("exon_length_diff", "sequence_diff") | 
+                                 build_change_chm13uniqregion==1 | 
+                                 !is.na(build_change_chm13_hg38_medically_relevant_genes), 1, 0 )) %>% 
+  mutate(multimap_diff = ifelse(abs(diff_mean_prop_multimapped.chm13_hg38) > 0.01, 1, 0)) %>% 
+  mutate(multimap_diff = ifelse(is.na(multimap_diff), 0, multimap_diff)) %>% 
+  mutate(other_build_issues = ifelse(!is.na(chm13_issue), 1, 0)) %>% 
+  mutate(hg38_issues = ifelse(!is.na(hg38_blacklist_reason) | !is.na(hg38_issue), 1, 0)) %>%
+  dplyr::select(gene_id, gene_id_from, gene_name, tissue, logFC_chm13_hg38, adj_pval_chm13_hg38, 
+                # diff_version, 
+                annot_diff, build_change, other_build_issues, hg38_issues, multimap_diff)
+
+# expressed per tissue
+tmp_chm13 %>% group_by(gene_id, gene_id_from, gene_name) %>% summarize(n_tissues = n_distinct(tissue)) %>% ungroup() %>% group_by(n_tissues) %>% summarize(n_genes = n_distinct(gene_id))
+
+# number of diff quant genes explained by issue OR something else
+tmp_chm13 %>% rbind(
+  tmp_chm13 %>% 
+    mutate(tissue = "Union",
+           logFC_chm13_hg38 = NA,
+           adj_pval_chm13_hg38 = NA) %>% 
+    # get max mutlimap level
+    group_by(across(c(-multimap_diff))) %>% 
+    summarize(multimap_diff = max(multimap_diff, na.rm = T)) %>% 
+    ungroup() %>% 
+    distinct()
+) %>% 
+  mutate(tissue = factor(tissue, ordered=T,
+                         levels = c("Blood", "Fibroblast", "PBMC", "Muscle", "iPS", "iPSC_NPC", "Union"))) %>% 
+  group_by(tissue) %>% 
+  summarize(sig = n_distinct(na.omit(gene_id)),
+            chm13_issue = n_distinct(na.omit(gene_id[other_build_issues==1 & hg38_issues==0])),
+            hg38_issue = n_distinct(na.omit(gene_id[hg38_issues==1 & other_build_issues==0])),
+            both_issue = n_distinct(na.omit(gene_id[hg38_issues==1 & other_build_issues==1])),
+            no_issue = n_distinct(na.omit(gene_id[hg38_issues==0 & other_build_issues==0])),
+            annot_change = n_distinct(na.omit(gene_id[annot_diff==1 & build_change==0 & hg38_issues==0 & other_build_issues==0])),
+            annot_and_build = n_distinct(na.omit(gene_id[annot_diff==1 & build_change==1 & hg38_issues==0 & other_build_issues==0])),
+            build_change = n_distinct(na.omit(gene_id[annot_diff==0 & build_change==1 & hg38_issues==0 & other_build_issues==0])),
+            mm_diff = n_distinct(na.omit(gene_id[multimap_diff==1 & hg38_issues==0 & other_build_issues==0])),
+            mm_diff_only = n_distinct(na.omit(gene_id[multimap_diff==1 & build_change==0 & hg38_issues==0 & other_build_issues==0])))
+
+tmp_chm13 %>% filter(multimap_diff==0 & hg38_issues==0 & other_build_issues==0 & annot_diff==0 & build_change==0) %>% pull(gene_id) %>% n_distinct()
+tmp_chm13 %>% filter(multimap_diff==0 & hg38_issues==0 & other_build_issues==0 & annot_diff==0 & build_change==0) %>% arrange(gene_id)
+
+  
+
+```
+
+```{r}
+
+sig_chm13 = tmp_chm13 %>% pull(gene_id) %>% unique()
+main_table %>% filter(gene_id %in% sig_chm13) %>% dplye::select(gene_id, chm13_paralog_parentgene_hg38)
+
+main_table %>% pull(chm13_paralog_parentgene_hg38) %>% unique()
+
+```
+
+## Top Genes
+
+```{r}
+
+main_table %>% 
+  group_by(tissue) %>% 
+  filter(is_omim_gene==1 | is_opentargets_gene==1 | is_cancer_gene==1 | is_clinvar_gene==1 | is_candidate_gene==1) %>% 
+  filter(abs(logFC_hg38_hg19) == max(abs(logFC_hg38_hg19), na.rm=T))
+
+main_table %>% 
+  group_by(tissue) %>% 
+  filter(abs(logFC_chm13_hg38) == max(abs(logFC_chm13_hg38), na.rm=T))
+
+
+```
+
+## Venn Diagram
+
+```{r}
+library(nVennR)
+
+create_venn_diagram = function(df, build, tissue, tissue_color, sig_gene_list, 
+                               # diff_gene_version_col="diff_version",
+                               annotation_comparison_col="annot_diff",
+                               build_change_col="build_change", 
+                               multimap_diff_col="multimap_diff",
+                               issue_cols=c("other_build_issues", "hg38_issues")){
+  # reason sets
+  # diff_gene_versions = merged_annot %>%
+  #   filter(!is.na(!!as.name(diff_gene_version_col))) %>%
+  #   filter(sig_tissue == !!tissue) %>%
+  #   pull(gene) %>% unique()
+  
+  savedir = getwd()
+  
+  annot_change = df %>% 
+    filter(!!as.name(annotation_comparison_col)==1) %>% 
+    # filter(tissue == !!tissue) %>% 
+    pull(gene_id) %>% unique()
+  
+  build_change = df %>% 
+    filter(!!as.name(build_change_col)==1) %>% 
+    # filter(tissue == !!tissue) %>% 
+    pull(gene_id) %>% unique()
+  
+  multimap_diff = df %>% 
+    filter(!!as.name(multimap_diff_col)==1) %>% 
+    # filter(tissue == !!tissue) %>% 
+    pull(gene_id) %>% unique()
+  
+  build_issues1 = df %>% 
+    filter(!!as.name(issue_cols[1])==1) %>% 
+    # filter(tissue == !!tissue) %>% 
+    pull(gene_id) %>% unique()
+  
+  build_issues2 = df %>% 
+    filter(!!as.name(issue_cols[2])==1) %>% 
+    # filter(tissue == !!tissue) %>% 
+    pull(gene_id) %>% unique()
+  
+  build_issues = unique(c(build_issues2, build_issues1))
+  
+  # make plot
+  v = plotVenn(list(`All Sig Genes` = sig_gene_list,
+             # `Diff Gene Versions` = diff_gene_versions,
+             # `Multimapping Diff` = multimap_diff,
+             `Build Issue` = build_issues,
+             `Annotation Change` = annot_change,
+             `Build Change` = build_change),
+             setColors = c("#f3f3f3", #"#279989", 
+                           "#beca50", "#e8ac44", "#cc453c"),
+             nCycles = 6000,
+             systemShow = T,
+             outFile = paste0(savedir, tissue, "_hg38v", build, "_DEG_reason_vennDiagram.svg"),
+             labelRegions=F,
+             fontScale=2,
+             opacity=0.2,
+             borderWidth=2)
+  
+  # throw out some stats
+  pct_annotations = round(length(sig_gene_list[sig_gene_list %in% annot_change & sig_gene_list %notin% build_change])/length(sig_gene_list)*100,1)
+  
+  pct_build = round(length(sig_gene_list[sig_gene_list %in% build_change & sig_gene_list %notin% annot_change])/length(sig_gene_list)*100,1)
+  
+  pct_both = round(length(sig_gene_list[sig_gene_list %in% build_change & sig_gene_list %in% annot_change])/length(sig_gene_list)*100,1)
+  
+  cat(paste0("\n", pct_annotations, "% of the ", length(sig_gene_list), " genes with apparent differential expression in ", tissue, " are explained by changes to the gene version alone;\n", pct_build, "% are explained by documented changes in the assembly;\n", pct_both, "% are explained by both.\n"))
+}
+
+blood_sig_hg19 = tmp_hg19 %>% filter(tissue == "Blood") %>% pull(gene_id) %>% unique()
+create_venn_diagram(df=tmp_hg19, "hg19", "Blood", "red", blood_sig_hg19)
+
+blood_sig_chm13 = tmp_chm13 %>% filter(tissue == "Blood") %>% pull(gene_id) %>% unique()
+create_venn_diagram(df=tmp_chm13, "chm13", "Blood", "red", blood_sig_chm13)
+
+
+
+sig_hg19 = tmp_hg19 %>% pull(gene_id) %>% unique()
+create_venn_diagram(df=tmp_hg19, "hg19", "Union", "red", sig_hg19)
+
+sig_chm13 = tmp_chm13 %>% pull(gene_id) %>% unique()
+create_venn_diagram(df=tmp_chm13, "chm13", "Union", "red", sig_chm13)
+
+
+```
+
+## Upset
+
+```{r fig.height=7, fig.width=12}
+library(UpSetR)
+
+create_upset = function(df, build, tissue, tissue_color, sig_gene_list, 
+                               # diff_gene_version_col="diff_version",
+                               annotation_comparison_col="annot_diff",
+                               build_change_col="build_change", 
+                               multimap_diff_col="multimap_diff",
+                               issue_cols=c("other_build_issues", "hg38_issues")){
+  # reason sets
+  # diff_gene_versions = merged_annot %>%
+  #   filter(!is.na(!!as.name(diff_gene_version_col))) %>%
+  #   filter(sig_tissue == !!tissue) %>%
+  #   pull(gene) %>% unique()
+  
+  savedir = getwd()
+  
+  annot_change = df %>% 
+    filter(!!as.name(annotation_comparison_col)==1) %>% 
+    filter(tissue == !!tissue) %>% 
+    pull(gene_id) %>% unique()
+  
+  build_change = df %>% 
+    filter(!!as.name(build_change_col)==1) %>% 
+    filter(tissue == !!tissue) %>% 
+    pull(gene_id) %>% unique()
+  
+  multimap_diff = df %>% 
+    filter(!!as.name(multimap_diff_col)==1) %>% 
+    filter(tissue == !!tissue) %>% 
+    pull(gene_id) %>% unique()
+  
+  build_issues1 = df %>% 
+    filter(!!as.name(issue_cols[1])==1) %>% 
+    filter(tissue == !!tissue) %>% 
+    pull(gene_id) %>% unique()
+  
+  build_issues2 = df %>% 
+    filter(!!as.name(issue_cols[2])==1) %>% 
+    filter(tissue == !!tissue) %>% 
+    pull(gene_id) %>% unique()
+  
+  build_issues = unique(c(build_issues2, build_issues1))
+  
+  # get order
+  order = c(length(sig_gene_list), length(annot_change), length(build_change), 
+    length(build_issues), length(multimap_diff))
+  names(order) = c("All diff quant genes", "Change in annotation", "Documented build change",
+                   "Documented build error", "Diff in multimapping rates")
+  order = sort(order)
+  
+  # make plot
+  listInput = list(`All diff quant genes`= sig_gene_list, 
+                   `Change in annotation` = annot_change, 
+                   `Documented build change` = build_change, 
+                   `Documented build error` = build_issues, 
+                   `Diff in multimapping rates` = multimap_diff)
+  
+  u = upset(fromList(listInput), text.scale = 9, point.size = 15, line.size = 3,
+        sets = names(order), order.by = c("freq"), keep.order = TRUE)
+  print(u)
+  
+# throw out some stats
+  pct_annotations = round(length(sig_gene_list[sig_gene_list %in% annot_change & sig_gene_list %notin% build_change])/length(sig_gene_list)*100,1)
+  
+  pct_build = round(length(sig_gene_list[sig_gene_list %in% build_change & sig_gene_list %notin% annot_change])/length(sig_gene_list)*100,1)
+  
+  pct_both = round(length(sig_gene_list[sig_gene_list %in% build_change & sig_gene_list %in% annot_change])/length(sig_gene_list)*100,1)
+  
+  cat(paste0("\n", pct_annotations, "% of the ", length(sig_gene_list), " genes with apparent differential expression in ", tissue, " are explained by changes to the gene version alone;\n", pct_build, "% are explained by documented changes in the assembly;\n", pct_both, "% are explained by both.\n"))
+}
+
+blood_sig_hg19 = tmp_hg19 %>% filter(tissue == "Blood") %>% pull(gene_id) %>% unique()
+create_upset(df=tmp_hg19, "hg19", "Blood", "red", blood_sig_hg19)
+
+blood_sig_chm13 = tmp_chm13 %>% filter(tissue == "Blood") %>% pull(gene_id) %>% unique()
+create_upset(df=tmp_chm13, "chm13", "Blood", "red", blood_sig_chm13)
+
+```
+
+
+# Volcano (poster)
+
+```{r fig.height=6, fig.width=13}
+logFC_loose = 1
+logFC_strict = 2
+alpha = 0.05
+
+
+comparison_labels = c("HG19 vs HG38", "HG38 vs CHM13")
+names(comparison_labels) = c("hg38_hg19", "chm13_hg38")
+
+to_plot = genes_full_annot5 %>% 
+  filter(tissue == "Blood") %>% 
+  # head(m=100) %>% 
+  # flip chm13 logFC direction so that + means higher quant in chm13
+  mutate(logFC_chm13_hg38 = -logFC_chm13_hg38) %>% 
+  # rename cateogries for easier splitting
+  rename(logFC.chm13_hg38 = logFC_chm13_hg38, logFC.hg38_hg19 = logFC_hg38_hg19,
+         adj_pval.chm13_hg38 = adj_pval_chm13_hg38, adj_pval.hg38_hg19 = adj_pval_hg38_hg19) %>% 
+  dplyr::select(gene_id, gene_id_from, gene_name, starts_with("featBiotype"), 
+                is_omim_gene, is_clinvar_gene, is_candidate_gene, candiate_sample_has_rnaseq, starts_with("n_samples_expressed"),
+                starts_with("logFC"), starts_with("adj_pval"), starts_with("outliers")) %>% 
+  gather(key = "key", value = "v", starts_with("logFC"), starts_with("adj_pval")) %>% 
+  separate(key, into = c("k", "comparison"), sep = "\\.") %>% 
+  spread(key = k, value = v) %>% 
+  # drop untested genes
+  filter(!is.na(logFC)) %>% 
+  # update selected disease annotations
+  mutate(comparison = comparison_labels[comparison]) %>% 
+  mutate(is_omim_gene = factor(ifelse(is.na(is_omim_gene),0,is_omim_gene)),
+         is_clinvar_gene = factor(ifelse(is.na(is_clinvar_gene),0,is_clinvar_gene)),
+         is_candidate_gene = factor(ifelse(is.na(is_candidate_gene),0,is_candidate_gene))) %>% 
+  mutate(omim_or_clinvar = ifelse(is_omim_gene==1 | is_clinvar_gene==1, 1, 0)) %>% 
+  # create variables to color points by
+  mutate(sig_pval = adj_pval <= !!alpha & abs(logFC) >= !!logFC_loose) %>%
+  mutate(status = ifelse(adj_pval <= !!alpha &
+                         abs(logFC) >= !!logFC_strict, paste0("abs(logFC)>",!!logFC_strict),
+                                ifelse(adj_pval <= !!alpha & abs(logFC) >= !!logFC_loose,
+                                       paste0("abs(logFC)>",!!logFC_loose), "Not significant"))) %>%
+  mutate(status = factor(status, ordered=T,
+                         levels = c(paste0("abs(logFC)>",!!logFC_strict),
+                                    paste0("abs(logFC)>",!!logFC_loose),
+                                    "Not significant"))) 
+
+to_plot %>% filter(is.na(status))
+
+
+# update adj_pval values that are 0 to next smallest pvalue
+to_plot = to_plot %>% 
+  mutate(adj_pval = ifelse(adj_pval==0, min(to_plot[to_plot$adj_pval>0,]$adj_pval), adj_pval))
+
+  
+# plot
+p = to_plot %>% 
+  filter(omim_or_clinvar != 1 | sig_pval == F) %>% 
+  ggplot(aes(x = logFC, y = -log10(adj_pval), color = status, alpha = sig_pval)) + 
+    geom_point(size = 2.4) +
+    ylab(expression(paste("-lo", g[10],"(adj pval)",sep=""))) +
+    scale_y_continuous(limits = c(0, 315), expand = c(0,0.1), oob = function(x, ...) x) +
+    scale_alpha_manual(values = c(0.3, 0.7), guide = "none") +
+    scale_color_manual(values = c("#e98300", "#dfad6e","ivory4")) +
+    coord_cartesian(clip = 'off') + # prevent out of bounds points from being clipped
+    theme_bw(base_size = 22) +
+    facet_wrap(~ comparison) +
+    theme(panel.grid.minor = element_blank(),
+        legend.title = element_blank(),
+        legend.spacing.y = unit(-0.3, "cm"),
+        # legend.position = "bottom",
+        strip.background = element_blank())
+
+
+p_omim = p + geom_point(data = subset(to_plot, is_omim_gene==1 & sig_pval == T),
+             aes(fill = "OMIM Gene"),
+             size = 3, shape = 23, alpha = 0.99, color = "transparent", lwd=0.1) +
+        scale_fill_manual(values = c("#0e9453")) +
+  theme(panel.grid.minor = element_blank(),
+        legend.title = element_blank(),
+        legend.spacing.y = unit(-0.3, "cm"))
+
+p_clinvar = p + geom_point(data = subset(to_plot, is_clinvar_gene==1 & sig_pval == T),
+             aes(fill = "ClinVar Gene"),
+             size = 3, shape = 23, alpha = 0.99, color = "transparent", lwd=0.1) +
+        scale_fill_manual(values = c("red")) +
+  theme(panel.grid.minor = element_blank(),
+        legend.title = element_blank(),
+        legend.spacing.y = unit(-0.3, "cm"))
+
+p_either = p + geom_point(data = subset(to_plot, omim_or_clinvar==1 & sig_pval == T),
+             aes(fill = "OMIM or ClinVar"),
+             size = 3, shape = 23, alpha = 0.99, color = "transparent", lwd=0.1) +
+        scale_fill_manual(values = c("blue")) +
+  theme(panel.grid.minor = element_blank(),
+        legend.title = element_blank(),
+        legend.spacing.y = unit(-0.3, "cm"))
+
+p_candidate = p + geom_point(data = subset(to_plot, is_candidate_gene==1 & sig_pval == T),
+             aes(fill = "Candidate"),
+             size = 3, shape = 23, alpha = 0.99, color = "transparent", lwd=0.1) +
+        scale_fill_manual(values = c("#009AB4")) + 
+  theme(panel.grid.minor = element_blank(),
+        legend.title = element_blank(),
+        legend.spacing.y = unit(-0.3, "cm"))
+
+print(p)
+print(p_omim)
+print(p_clinvar)
+print(p_either)
+print(p_candidate)
+
+
+```
+
+```{r}
+
+to_plot %>% filter(sig_pval & abs(logFC)>=1) %>% 
+  group_by(comparison) %>% 
+  summarize(n_sig = n_distinct(gene_id),
+            n_omim = n_distinct(gene_id[is_omim_gene=="1"]),
+            n_clinvar = n_distinct(gene_id[is_clinvar_gene=="1"]),
+            n_omim_or_clinvar = n_distinct(gene_id[omim_or_clinvar=="1"]),
+            n_candidate = n_distinct(gene_id[is_candidate_gene=="1"])) %>% t() %>% as.data.frame()
+
+
+to_plot %>% filter(is_candidate_gene==1 & 
+                     sig_pval & 
+                     (outliers_z3z1_hg38_hg19>0 | outliers_z3diff05_hg38_hg19>0 | outliers_z3diff05_chm13_hg38>0 | outliers_z3z1_chm13_hg38>0) ) %>% 
+  arrange(candiate_sample_has_rnaseq)
+
+```
+
+
+
+
+
+
+
+
+

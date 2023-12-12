@@ -1,0 +1,141 @@
+import os, glob, yaml,sys
+import pandas as pd
+from datetime import datetime
+
+# get date for labeling output folder
+date=datetime.now().strftime("%Y%m%d")
+print(date)
+
+# make output directory
+try:
+   os.makedirs(config["analysis_dir"]+"/TPMDifferences/output/03_LIMMA_DiffExp_" + date)
+except FileExistsError:
+   # directory already exists
+   pass
+
+
+# eventually this should all be in the config file
+TISSUES=["Blood", "Fibroblast", "PBMC", "Muscle", "iPS", "iPSC_NPC"]
+dupStatus = "dedupOptical"
+minMapQ = config["min_mapping_quality"]
+BUILDS1=["chm13ensembl","chm13ensembl","hg38"]
+BUILDS2=["hg38","hg19","hg19"]
+
+# get union of builds from the build list
+tmp = BUILDS1.copy()
+tmp.extend(BUILDS2)
+target_builds = list(set(tmp))
+del tmp
+
+build_dirs = [build.rstrip("ensembl") for build in target_builds]
+
+print("Reading samples from:\n" + config["sample_file"])
+sample_table = pd.read_csv(config["sample_file"], sep='\t').set_index("SAMPLE", drop=False)
+sample_table.index.name = None
+sample_table.columns = sample_table.columns.str.upper()
+#sample_table=sample_table.filter(items="RD271")
+SAMPLES = list(sample_table.index.values)
+print(SAMPLES)
+
+SAMPLE_TISSUES = list(sample_table.TISSUE)
+
+# get pixel distance as a wildcard list
+if "PIXEL_DIST" in sample_table:
+    print("Getting pixel distance for optical duplicates from sample table")
+    PXDIST_LIST = list(sample_table.PIXEL_DIST)
+elif "pixel_distance" in config:
+    print("Getting pixel distance for optical duplicates from config file")
+    PXDIST_LIST = [ config["pixel_distance"] ] * len(sample_table.index)
+else:
+    print("Using default pixel distance for optical duplicates: 100px")
+    PXDIST_LIST = [100] * len(sample_table.index)
+
+def get_rsem_results(wildcards):
+    # get subset of rsem files for samples of given tissue to be collated
+    build = wildcards.build
+    build_dir = build.rstrip("ensembl")
+    file_list = []
+    for i, current_tissue in enumerate(SAMPLE_TISSUES):
+        if current_tissue == wildcards.tissue:
+            file_list.append(config["output_dir"] + "/" + build_dir + "/RSEM/" + str(SAMPLES[i]) + "." + build + ".sorted_opticalDup" + 
+                        str(PXDIST_LIST[i]) + "_" + dupStatus + "_minMQ" + minMapQ + "_rsem.genes.results")    
+    return file_list
+
+wildcard_constraints:
+    tissue="[^/]+"
+
+rule all:
+    input:
+        expand(expand(config["output_dir"] + "/{{build_dir}}/eOutliers/{tissue}.{{build}}." + 
+                    dupStatus + "_minMQ" + minMapQ + "_rsem.genes.results", tissue=TISSUES), 
+                    zip, build_dir=build_dirs, build=target_builds),
+        expand(config["analysis_dir"]+"/TPMDifferences/output/01_PreppedCountData/{tissue}.{build}." + 
+                dupStatus + "_minMQ" + minMapQ + "_rsem.genes.counts_matrix.txt",
+                tissue=TISSUES, build=target_builds)
+        # expand(expand(config["analysis_dir"]+"/TPMDifferences/output/03_LIMMA_DiffExp_" + date + "/{{tissue}}." + 
+        #         dupStatus + "_minMQ" + minMapQ + ".diff_expression_{build1}_vs_{build2}.log",
+        #         zip, build1=BUILDS1, build2=BUILDS2), tissue=TISSUES)
+
+rule get_tpm_by_tiss:
+    input:
+        files = lambda wildcards: get_rsem_results(wildcards)
+        # files=expand(config["output_dir"] + "/{{build}}/RSEM/{sample}.{{build}}.sorted_opticalDup{pxdist}_" + dupStatus + "_minMQ" + minMapQ + "_rsem.{{gene_or_isoform}}.results",
+        # zip,sample=SAMPLES, pxdist = PXDIST_LIST)
+    params:
+        tissue="{tissue}",
+        delim="." #"_" #delim to extract sample
+    output:
+        counts=config["output_dir"] + "/{build_dir}/eOutliers/{tissue}.{build}." + dupStatus + "_minMQ" + minMapQ + "_rsem.genes.results"
+    run:
+        for f in input:
+            #sample=split(split(f,"/")[-1],params[1])
+            sample=(((f.split("/"))[-1]).split(params[1]))[0]
+            # this_samples_tissue=sample_table.loc[sample, "TISSUE"]
+            # if(this_samples_tissue == params[0]):
+            shell("""tail -n +2 """+f+""" | awk -F"\t" -v sample="""+sample+""" '{{print sample"\t"$1"\t"$2"\t"$6}}' >> {output}""")
+
+rule get_count_matrix:
+    input:
+        rsem = ancient(config["rsem"]),
+        files = lambda wildcards: get_rsem_results(wildcards)
+    output:
+        counts = config["analysis_dir"]+"/TPMDifferences/output/01_PreppedCountData/{tissue}.{build}." + 
+                 dupStatus + "_minMQ" + minMapQ + "_rsem.genes.counts_matrix.txt"
+    shell:
+        """
+            {input.rsem}/rsem-generate-data-matrix {input.files} | sed 's|"||g' | sed '1 s|[^[:space:]]*/||g' | sed '1 s|\.[^[:space:]]*||g' > {output.counts};
+            # the sed pipes remove the path and suffix from the column names, leaving just the sample IDs
+        """
+
+rule run_limma: # TO DO: split prep into separate rules
+    input:
+        md=config["metadata"],
+        build1_infile = config["analysis_dir"]+"/TPMDifferences/output/01_PreppedCountData/{tissue}.{build1}." + dupStatus + "_minMQ" + minMapQ + "_rsem.genes.counts_matrix.txt",
+        build2_infile = config["analysis_dir"]+"/TPMDifferences/output/01_PreppedCountData/{tissue}.{build2}." + dupStatus + "_minMQ" + minMapQ + "_rsem.genes.counts_matrix.txt",
+        # build1_infile=get_build1_infile,
+        # build2_infile=get_build2_infile,
+        rscript=ancient("rare_build/DifferentialExpression/03_LIMMA_DREAM.R")
+    params:
+        build1="{build1}",
+        build2="{build2}",
+        tissue="{tissue}",
+        intermed_dir=config["analysis_dir"]+"/TPMDifferences/output/02_intermediateOutputs/",
+        counts_outfile=config["analysis_dir"]+"/TPMDifferences/output/03_LIMMA_DiffExp_" + date + "/{tissue}." + dupStatus + "_minMQ" + minMapQ + ".diff_expression_{build1}_vs_{build2}.limma_voom_dream.countmatrix.txt",
+        fitmm_outfile=config["analysis_dir"]+"/TPMDifferences/output/03_LIMMA_DiffExp_" + date + "/{tissue}." + dupStatus + "_minMQ" + minMapQ + ".diff_expression_{build1}_vs_{build2}.limma_voom_dream.fit.txt",
+        results_outfile=config["analysis_dir"]+"/TPMDifferences/output/03_LIMMA_DiffExp_" + date + "/{tissue}." + dupStatus + "_minMQ" + minMapQ + ".diff_expression_{build1}_vs_{build2}.limma_voom_dream.all.txt",
+        sig_outfile=config["analysis_dir"]+"/TPMDifferences/output/03_LIMMA_DiffExp_" + date + "/{tissue}." + dupStatus + "_minMQ" + minMapQ + ".diff_expression_{build1}_vs_{build2}.limma_voom_dream.significant.txt"
+    output:
+        log=config["analysis_dir"]+"/TPMDifferences/output/03_LIMMA_DiffExp_" + date + "/{tissue}." + dupStatus + "_minMQ" + minMapQ + ".diff_expression_{build1}_vs_{build2}.log"
+    shell:
+        """
+        module load R
+        Rscript {input.rscript} --build1 {params.build1} --build2 {params.build2} \
+            --build1_infile {input.build1_infile} --build2_infile {input.build2_infile} \
+            --md {input.md} --tissue {params.tissue} --intermediate_outdir {params.intermed_dir}\
+            --fitmm_outfile {params.fitmm_outfile} --sig_outfile {params.sig_outfile} --results_outfile {params.results_outfile} > {output}
+        """
+# rule analyze_limma:
+#     input:
+#         sig_outfile=config["analysis_dir"]+"/TPMDifferences/output/03_LIMMA_DiffExp/{tissue}." + dupStatus + "_minMQ" + minMapQ + ".diff_expression_{build1}_vs_{build2}.limma_voom_dream.all.txt.gz",
+#     params:
+#     output:

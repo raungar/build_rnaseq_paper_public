@@ -1,0 +1,157 @@
+---
+title: "SplicingCompare"
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+library(data.table)
+library(ggplot2)
+library(tidyverse)
+zscores<-fread("/Volumes/groups/smontgom/shared/UDN/Analysis/ReferenceComparisonPrimary/TPMDifferences/zscores_genesdiff.soutliers.txt.gz")
+md=fread("/Volumes/groups/smontgom/shared/UDN/Data/SampleTables/udn_sample_table_2017to2022.txt")
+sample_to_tiss<-md$TISSUE
+sample_to_readlen<-md$READ_LENGTH
+sample_to_status<-md$STATUS
+names(sample_to_tiss)=names(sample_to_readlen)=names(sample_to_status)<-md$SAMPLE
+zscores_wmd<-zscores%>% mutate(tissue=sample_to_tiss[sample_id]) %>%
+  mutate(readlen=sample_to_readlen[sample_id])%>% mutate(status=sample_to_status[sample_id])
+#rank r2=0.88
+```
+
+## number of outliers
+```{r}
+outlier_threshold=2
+num_outliers_hg19<-zscores[,c("sample_id","gene","z_hg19")]%>%dplyr::filter(z_hg19>2)%>%count(sample_id)%>%mutate(build="hg19")
+num_outliers_hg38<-zscores[,c("sample_id","gene","z_hg38")]%>%dplyr::filter(z_hg38>2)%>%count(sample_id)%>%mutate(build="hg38")
+num_outliers<-rbind(num_outliers_hg19,num_outliers_hg38)
+ggplot(num_outliers,aes(x=build,y=n))+geom_violin()+theme_bw()+ggtitle("num splicing outlier genes per sample across build")
+
+```
+
+## solved 
+```{r}
+solved_stanford_transcriptomics<-fread("/Volumes/groups/smontgom/shared/UDN/ReferenceFiles/solved_cases_june2022.txt") 
+rdid_to_ensg<-solved_stanford_transcriptomics$ENSG
+names(rdid_to_ensg)<-solved_stanford_transcriptomics$RDID
+solved_stanford_transcriptomics_blood<-solved_stanford_transcriptomics%>%dplyr::filter(Tissue=="Blood")
+solved_stanford_transcriptomics_fibroblast<-solved_stanford_transcriptomics%>%dplyr::filter(Tissue=="Fibroblast")
+#dplyr::filter(z_diff_fibroblast_sorted,z_hg38!=0 & z_hg19 !=0)
+zdiff_solved_stanford_spl<-zscores_wmd%>%dplyr::filter(sample_id %in% names(rdid_to_ensg) & rdid_to_ensg[sample_id]==gene)
+# zdiff_solved_stanford_fibroblast<-z_diff_fibroblast%>%dplyr::filter(sample_id %in% names(rdid_to_ensg) & rdid_to_ensg[sample_id]==gene)
+#z_diff_blood
+zdiff_solved_all<-rbind(cbind(solved_stanford_transcriptomics_blood,"tissue"="blood"),
+                  cbind(solved_stanford_transcriptomics_fibroblast,"tissue"="fibroblast")) #,
+ggplot(zdiff_solved_stanford_spl,
+       aes(x=z_hg19,y=z_hg38,color=abs(z_diff),alpha=0.8,shape=as.factor(tissue),size=3))+
+  scale_color_gradient(low="#5de3ab",high="#280a47")+
+  geom_hline(yintercept = 2 ,color="black",alpha=0.8)+  
+  geom_vline(xintercept = 2,color="black",alpha=0.8)+
+    geom_abline(intercept=0,color="orange",alpha=0.8)+ 
+    geom_point()+ 
+  theme_bw()+ggtitle("Splicing Solved hg19 vs. hg38 z")
+
+```
+ 
+## compare outliers
+```{r}
+zscores_wmd_nozeros<-zscores_wmd%>%dplyr::filter(z_hg19!=0 | z_hg38 !=0) %>%dplyr::filter(tissue=="Blood")
+ggplot(zscores_wmd%>%dplyr::filter(gene=="ENSG000"),
+       aes(x=z_hg19,y=z_hg38,color=abs(z_diff),alpha=0.7))+
+  scale_color_gradient(low="#957186",high="#70a9a1")+
+  geom_hline(yintercept = 2 ,color="gray",alpha=0.8)+  
+  geom_vline(xintercept = 2,color="gray",alpha=0.8)+
+  geom_point(size=4)+ 
+    geom_abline(intercept=0,color="orange",alpha=0.8)+ 
+  theme_bw(base_size = 12)+ggtitle("Splicing Blood hg19 vs. hg38 z ENSG000")
+
+```
+
+### case example
+```{r}
+clu_57230<-as.data.frame(fread("/Volumes/groups/smontgom/raungar/UDN/clu_57230_NA.counts.txt"))
+clu_51380_NA<-as.data.frame(fread("/Volumes/groups/smontgom/raungar/UDN/clu_39902_NA.hg19.counts.txt"))
+all_blood_clus_hg19<-fread("/Volumes/groups/smontgom/shared/UDN/PreprocessingHG19/Splicing/LeafCutterMD/Junctions/udn_Blood_perind_numers.counts.gz")
+all_blood_clus_hg38<-fread("/Volumes/groups/smontgom/shared/UDN/PreprocessingHG38/Splicing/LeafCutterMD/Junctions/udn_Blood_perind_numers.counts.gz")
+this_clus_hg38<-"clu_10823_NA"#hg38 ENSG00000
+this_clus_hg19<-"clu_56885_NA" #hg19 ENSG00000
+myclus<-all_blood_clus_hg38%>%dplyr::filter(str_detect(V1,this_clus_hg38))
+# rownames(clu_51380_NA)<-clu_51380_NA$V1
+myclus_melt<-melt(myclus)
+colnames(myclus_melt)<-c("intron","sample","reads_overlapping") #
+outliers_to_filt<-c("iD") 
+myclus_melt$outlier_status<-ifelse(myclus_melt$sample%in%outliers_to_filt,"outlier","nonoutlier")
+myclus_melt<-myclus_melt%>%group_by(sample)%>%  
+  mutate(reads_total = sum(reads_overlapping)) %>%ungroup%>%
+  mutate(prop_reads_overlapping=reads_overlapping/reads_total)
+ggplot(myclus_melt,aes(x=intron,y=prop_reads_overlapping,color=outlier_status,alpha=0.7))+
+  theme_bw()+
+  # scale_color_gradientn(colours = rainbow(5))+
+   # scale_y_continuous(trans='log10')+
+  geom_line(aes(group=sample,alpha=0.6),size=1)+
+  geom_line(data=myclus_melt%>%dplyr::filter(outlier_status=="outlier"),aes(group=sample,alpha=0.6),size=1.5)+
+     scale_color_manual(values=c("#5de3ab","#280a47"))+ggtitle("ENSG hg38")+
+  ylim(c(0,1))+
+  #   geom_point(data=clu_57230_melt%>%dplyr::filter(sample%in%clu_57230_outliers))+
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))
+
+```
+
+### num consistent outliers
+```{r}
+zscores_wmd_blood<-zscores_wmd%>%dplyr::filter(tissue=="Blood")
+print(zscores_wmd_blood%>%dplyr::filter(z_hg19>=3 & z_hg38>=3)%>%nrow()/zscores_wmd_blood%>%dplyr::filter(z_hg19>=3)%>%nrow())
+print(zscores_wmd_blood%>%dplyr::filter(z_hg19>=3 & is.na(z_hg38))%>%nrow()/zscores_wmd_blood%>%dplyr::filter(z_hg19>=3)%>%nrow())
+for(i in c(1,2,3)){
+  denom=zscores_wmd_blood%>%dplyr::filter(z_hg19>=3)%>%nrow()
+  numerator=(zscores_wmd_blood%>%dplyr::filter(z_hg19>=3 & z_hg38<i)%>%nrow())
+  frac=numerator/denom*100
+    print(paste0("z<",i, " is ", round(frac,3)))
+
+}
+```
+
+## numb splicing outliers per ind
+```{r}
+outlier_thresh=3
+num_outliers_per_ind_hg19<-zscores_wmd%>%dplyr::filter(z_hg19>outlier_thresh)%>%dplyr::filter(!is.na(status))%>%group_by(sample_id)%>%mutate(num_outliers=n())%>%select(sample_id,status,tissue,readlen,num_outliers)%>%unique()
+num_outliers_per_ind_hg38<-zscores_wmd%>%dplyr::filter(z_hg38>outlier_thresh)%>%group_by(sample_id)%>%mutate(num_outliers=n())%>%select(sample_id,status,tissue,readlen,num_outliers)%>%unique()
+# ggplot(num_outliers_per_ind_hg38,aes(x=tissue,y=num_outliers,fill=as.factor(readlen)))+
+#ggplot(num_outliers_per_ind_hg38,aes(x=tissue,y=num_outliers,fill=interaction(tissue,readlen),alpha=0.8))+
+# ggplot(num_outliers_per_ind_hg38,aes(x=tissue,y=num_outliers,fill=status))+
+ggplot(num_outliers_per_ind_hg38,aes(x=status,y=num_outliers,fill=status))+
+  scale_fill_manual(values=c("#8AD2B0","#313978"))+
+  geom_violin()+theme_bw() +ylim(c(0,500))
+
+###diff otuliers
+outlier_thresh=3
+zscores_isoutlier<-zscores_wmd%>%dplyr::filter(z_hg19>outlier_thresh|z_hg38>outlier_thresh)
+# zscores_isoutlier<-zscores_wmd%>%dplyr::filter(z_hg19>outlier_thresh&z_hg38>outlier_thresh)
+zscores_wmd_outlier38<-zscores_wmd%>%dplyr::filter(z_hg38>outlier_thresh)
+zscores_wmd_outlier19<-zscores_wmd%>%dplyr::filter(z_hg19>outlier_thresh)
+zscores_isoutlier_onlyone<-zscores_isoutlier%>%dplyr::filter(z_hg19<1|z_hg38<1|is.na(z_hg19)|is.na(z_hg38))
+zscores_isoutlier_onlyone%>%dplyr::filter(z_hg19>outlier_thresh)%>%nrow()
+
+num_outliers_perind_perbuild<-zscores_isoutlier%>%
+  group_by(sample_id)%>%
+  mutate(hg19_num_outliers=sum(z_hg19>outlier_thresh,na.rm = T))%>%
+  mutate(hg38_num_outliers=sum(z_hg38>outlier_thresh,na.rm = T))%>%
+  mutate(build_diff_outliers=hg38_num_outliers-hg19_num_outliers)%>%
+  select(sample_id,status,tissue,readlen,hg19_num_outliers,hg38_num_outliers,build_diff_outliers)%>%unique()
+melted_outliers_perind<-(melt(num_outliers_perind_perbuild[,c("sample_id","hg19_num_outliers","hg38_num_outliers")]))
+melted_outliers_perind$status<-sample_to_status[melted_outliers_perind$sample_id]
+melted_outliers_perind$readlen<-sample_to_readlen[melted_outliers_perind$sample_id]
+melted_outliers_perind$tissue<-sample_to_tiss[melted_outliers_perind$sample_id]
+# ggplot(num_outliers_perind_perbuild,aes(x=build_diff_outliers))+geom_density()+theme_bw()+xlim(-150,150)
+ggplot(melted_outliers_perind,aes(x=variable,y=value,alpha=0.7))+
+  geom_violin()+
+  geom_line(aes(group=sample_id))+#+ylim(0,50)
+  theme_bw()+facet_wrap(~readlen,scales = "free_y")
+# ggplot(num_outliers_perind_perbuild%>%dplyr::filter(abs(build_diff_outliers)<1500),
+#        aes(x=hg19_num_outliers,y=hg38_num_outliers,color=build_diff_outliers))+
+#   scale_color_gradient2(low = "blue", mid = "yellow", high = "red",midpoint=0)+
+#   geom_point()+theme_bw()+geom_abline(intercept=0,color="red")
+
+```
+
+

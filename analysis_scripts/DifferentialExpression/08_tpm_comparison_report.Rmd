@@ -1,0 +1,31 @@
+---
+title: "TPM Comparisons by Genome Build"
+author: "P Goddard"
+date: '2022-08-02'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+library(data.table)
+library(tidyr)
+library(tibble)
+library(readr)
+library(stringr)
+library(ggplot2)
+library(dplyr)
+
+```
+
+```{r}
+tissue = ""
+builds = c("", "")
+BUILDS = str_to_upper(builds)
+
+indir = ""
+refdir = ""
+savedir = ""
+if (!dir.exists(savedir)){ dir.create(savedir) }
+
+```

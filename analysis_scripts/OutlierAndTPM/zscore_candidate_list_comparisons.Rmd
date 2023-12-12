@@ -1,0 +1,883 @@
+---
+title: "Candidate Gene Comparisons"
+output: html_notebook
+---
+
+```{r}
+knitr::opts_chunk$set(echo = FALSE)
+
+library(data.table)
+library(ggplot2)
+library(ggpubr) # ggarrange
+library(ggrepel)
+library(tidyr)
+library(readr)
+library(stringr)
+library(tibble)
+library(dplyr)
+
+`%notin%` <- Negate(`%in%`)
+
+
+```
+
+# Expression
+
+## Load zscores
+
+```{r}
+get_zscores <- function(build, tissues=c("Blood", "Fibroblast"), filter_list=NULL){
+  build_dir = str_remove(build, "ensembl")
+  expression_dir = paste0("/oak/stanford/groups/smontgom/shared/UDN/Output/", build_dir, "/eOutliers/")
+  
+  for (tissue in tissues){
+    zfile = paste0(expression_dir, tissue, ".", build, ".sorted_opticalDupdedupOptical_minMQ255_rsem.genes.zscores.txt")
+    z = read_tsv(zfile) %>% 
+      dplyr::select(sample = sample_id, gene_id = gene, zscore) %>% 
+      mutate(gene = str_remove(gene_id, "\\..*")) %>% 
+      mutate(tissue = !!tissue)
+    
+    if(!is.null(filter_list)){
+      z = z %>% filter(sample %in% !!filter_list)
+    }
+    
+    z_all = rbind(if(exists("z_all")) z_all, z)
+  }
+  
+  return(z_all)
+}
+
+```
+
+```{r}
+metadatafile="/oak/stanford/groups/smontgom/shared/UDN/Data/Metadata/2017to2022_metadata.tsv"
+
+metadata = read_tsv(metadatafile)
+cases = metadata %>% 
+  filter(grepl("UDN", institution)) %>% 
+  # filter(source_of_RNA == "Blood") %>% 
+  filter(affected_status == "Case") %>% 
+  pull(sample_id)
+
+chm13only_file = "/oak/stanford/groups/smontgom/shared/UDN/ReferenceFiles/CHM13v2.0/chm13.T2T.s11.extragenes.txt"
+chm13only = read_tsv(chm13only_file, col_names = "gene_id")
+
+z_hg19 <- get_zscores("hg19", filter_list=NULL) %>% 
+  rename(hg19 = zscore, gene_version_hg19 = gene_id)
+  # mutate(build = "hg19")
+
+z_hg38 <- get_zscores("hg38", filter_list=NULL) %>% 
+  rename(hg38 = zscore, gene_version_hg38 = gene_id)
+  # mutate(build = "hg38")
+
+z_chm13 <- get_zscores("chm13ensembl", filter_list=NULL) %>% 
+  rbind(get_zscores("chm13", filter_list=NULL) %>% 
+          filter(gene_id %in% chm13only$gene_id)
+  ) %>% 
+  rename(chm13 = zscore, gene_version_chm13 = gene_id)
+  # mutate(build = "chm13")
+
+gc()
+
+#zscores = rbind(rbind(z_hg19, z_hg38),z_chm13)
+
+zscores = full_join(full_join(z_hg19, z_hg38), z_chm13) %>% 
+  left_join(metadata %>% 
+              dplyr::select(indv_id, sample=sample_id, affected_status, origin, country_of_origin, 
+                            resolved_case, causal_gene, candidate_gene_list, disease_category, HPO_terms_ID),
+            by = c())
+
+rm(z_chm13, z_hg19, z_hg38, chm13only)
+gc()
+
+head(zscores)
+
+write_tsv(zscores, "/oak/stanford/groups/smontgom/shared/UDN/Analysis/ReferenceComparisonPrimary/ZscoreDifferences/alltissues_allbuilds.sorted_opticalDupdedupOptical_minMQ255_rsem.genes.zscores.txt")
+
+```
+
+## Gene List Comparisons
+
+```{r}
+# thresholds
+top_n = 20
+min_z = 2
+
+# functions to compare top n lists per patient across builds
+jaccard <- function(a, b) {
+    intersection = length(intersect(a, b))
+    union = length(a) + length(b) - intersection
+    return (intersection/union)
+}
+
+sect <- function(a, b) {
+  return(length(intersect(a,b)))
+}
+```
+
+```{r}
+if(!exists("zscores")){
+  zscores = fread("/oak/stanford/groups/smontgom/shared/UDN/Analysis/ReferenceComparisonPrimary/ZscoreDifferences/alltissues_allbuilds.sorted_opticalDupdedupOptical_minMQ255_rsem.genes.zscores.txt")
+}
+
+candidates = zscores %>% 
+  # make long
+  dplyr::select(-starts_with("gene_version"), -origin, -country_of_origin, -disease_category, -HPO_terms_ID) %>% 
+  gather(key = "build", value = "zscore", hg19, hg38, chm13) %>% 
+  
+  # get the candidate gene lists lists for cases (top n genes with |zscore| > min Z threshold)
+  group_by(across(c(-zscore, -gene))) %>% 
+  slice_max(abs(zscore), n = top_n) %>%
+  filter(abs(zscore) > min_z) #%>% 
+  
+  # compare candidate gene lists (top n most extreme outliers with minimum abs zscore)
+candidates = candidates %>% 
+  summarize(candidates = paste0(gene, collapse = ","))
+
+candidate_comparisons = candidates %>% 
+  # get number of chm13-specific genes in candidate gene lists
+  spread(key = build, value = candidates) %>% 
+  mutate(n_chm13uniq  = length(unlist(str_split(chm13, ","))[!grepl("ENSG", unlist(str_split(chm13, ",")))]) ) %>% 
+  
+  # Calculate candidate gene list size
+  mutate( size.hg19 = length(unlist(str_split(hg19, ","))) ) %>% 
+  mutate( size.hg38 = length(unlist(str_split(hg38, ","))) ) %>% 
+  mutate( size.chm13 = length(unlist(str_split(chm13, ","))) ) %>%
+  
+  # Calculate intersection size
+  mutate( intersect.hg19_hg38 = sect(unlist(str_split(hg19, ",")), unlist(str_split(hg38, ","))) ) %>% 
+  # mutate( intersect.hg19_chm13 = sect(unlist(str_split(hg19, ",")), unlist(str_split(chm13, ","))) ) %>% 
+  mutate( intersect.hg38_chm13 = sect(unlist(str_split(hg38, ",")), unlist(str_split(chm13, ","))) ) %>%
+  
+  # Calculate jaccard similarity
+  mutate( jaccard.hg19_hg38 = jaccard(unlist(str_split(hg19, ",")), unlist(str_split(hg38, ","))) ) %>% 
+  # mutate( jaccard.hg19_chm13 = jaccard(unlist(str_split(hg19, ",")), unlist(str_split(chm13, ","))) ) %>% 
+  mutate( jaccard.hg38_chm13 = jaccard(unlist(str_split(hg38, ",")), unlist(str_split(chm13, ","))) ) %>% 
+  ungroup()
+
+```
+
+### make plots
+
+#### set size distribution
+
+```{r fig.height=3, fig.width=6}
+
+plot_candidate_list_size <- function(df, top_n=10, min_z=3, selected_tissue="Blood", affected_status_filter=NULL, outlier_type="expression", save_plots=T){
+  
+  # filter data
+  to_plot = df %>% filter()
+  
+  if(is.null(affected_status_filter)) {
+    to_plot = to_plot %>% filter(tissue == selected_tissue)
+    sample_type = "participants"
+  } else {
+    to_plot = to_plot %>% filter(tissue == selected_tissue & 
+                                   affected_status == affected_status_filter)
+    sample_type = paste0(str_to_lower(affected_status_filter),"s")
+  }
+  
+  # values for informative titles
+  n_individuals = to_plot %>% pull(indv_id) %>% n_distinct()
+  n_samples = to_plot %>% pull(sample) %>% n_distinct()
+  plot_title = paste("Candidate gene list size for", n_individuals, sample_type)
+  plot_subtitle = paste("based on top", top_n, outlier_type, "outliers (abs(Z)>", min_z,") across", n_samples, str_to_lower(selected_tissue), "samples")
+  
+  # make plot
+  p = to_plot %>% 
+    dplyr::select(sample, starts_with("size")) %>% 
+    gather(key="key", value="size", -sample) %>% 
+    separate(key, into=c("x", "builds"), sep="\\.") %>% 
+    mutate(builds = factor(builds, ordered=T, levels=c("hg19","hg38","chm13"))) %>% 
+    ggplot() + 
+      geom_histogram(aes(x=size, fill = builds)) +
+      scale_x_continuous(name="# Genes in build candidate gene list") +
+      # scale_y_continuous(trans="log10") +
+      scale_fill_manual(values = c("#8C1515", "#dea700", "#01427a"), guide = "none") +
+      theme_bw() +
+      ggtitle(plot_title, subtitle = plot_subtitle) +
+      facet_wrap(~builds)
+  
+    if(save_plots){
+      ggsave(paste0("plots/candidate_gene_list_size_top", top_n, "_minz", min_z, ".", selected_tissue, ".", outlier_type, ".", sample_type, ".svg"), p)
+      ggsave(paste0("plots/candidate_gene_list_size_top", top_n, "_minz", min_z, ".", selected_tissue, ".", outlier_type, ".", sample_type, ".png"), p)
+    }
+  
+  print(p)
+  
+}
+
+plot_candidate_list_size(candidate_comparisons, top_n=top_n, min_z=min_z, selected_tissue="Blood", affected_status_filter="Case", save_plots = F)
+plot_candidate_list_size(candidate_comparisons, top_n=top_n, min_z=min_z, selected_tissue="Fibroblast", affected_status_filter="Case", save_plots = F)
+
+```
+
+#### intersection size between builds
+
+```{r fig.height=3, fig.width=6}
+
+plot_candidate_intersection_size <- function(df, top_n=10, min_z=3, selected_tissue="Blood", affected_status_filter="Case", outlier_type="expression", save_plots=T){
+  
+  # filter data
+  if(is.null(affected_status_filter)) {
+    to_plot = df %>% filter(tissue == selected_tissue)
+    sample_type = "participants"
+  } else {
+    to_plot = df %>% filter(tissue == selected_tissue & 
+                                   affected_status == affected_status_filter)
+    sample_type = paste0(str_to_lower(affected_status_filter),"s")
+  }
+  
+  # values for informative titles
+  n_individuals = to_plot %>% pull(indv_id) %>% n_distinct()
+  n_samples = to_plot %>% pull(sample) %>% n_distinct()
+  plot_title = paste("Candidate gene list size for", n_individuals, sample_type)
+  plot_subtitle = paste("based on top", top_n, outlier_type, "outliers (abs(Z)>", min_z,") across", n_samples, str_to_lower(selected_tissue), "samples")
+  
+  # make plot
+  p = to_plot %>% 
+    dplyr::select(sample, starts_with("intersect")) %>% 
+    gather(key="key", value="intersect", -sample) %>% 
+    separate(key, into=c("x", "builds"), sep="\\.") %>% 
+    mutate(builds = factor(builds, ordered=T, levels=c("hg19_hg38","hg38_chm13"))) %>%  
+    # drop hg19 vs chm13
+    filter(builds != "hg19_chm13") %>% 
+    # plot
+    ggplot() + 
+      geom_histogram(aes(x=intersect, fill = builds)) +
+      scale_x_continuous(name="# Genes in both candidate gene lists") +
+      # scale_y_continuous(trans="log10") +
+      scale_fill_manual(values = c("#d07c10", "#006B2F"), guide = "none") +
+      theme_bw() +
+      ggtitle(plot_title, subtitle = plot_subtitle) +
+      facet_wrap(~builds)
+  
+    if(save_plots){
+      ggsave(paste0("plots/candidate_gene_list_intersect_top", top_n, "_minz", min_z, ".", selected_tissue, ".", outlier_type, ".", sample_type, ".svg"), p)
+      ggsave(paste0("plots/candidate_gene_list_intersect_top", top_n, "_minz", min_z, ".", selected_tissue, ".", outlier_type, ".", sample_type, ".png"), p)
+    }
+  
+  return(p)
+  
+}
+
+
+plot_candidate_intersection_size(candidate_comparisons, top_n=top_n, min_z=min_z, selected_tissue="Blood", affected_status_filter="Case", save_plots = T)
+plot_candidate_intersection_size(candidate_comparisons, top_n=top_n, min_z=min_z, selected_tissue="Fibroblast", affected_status_filter="Case", save_plots = T)
+
+```
+
+
+#### jaccard similarity between builds
+
+```{r fig.height=3, fig.width=6}
+
+plot_candidate_intersection_size <- function(df, top_n=10, min_z=3, selected_tissue="Blood", affected_status_filter="Case", outlier_type="expression", save_plots=T){
+  
+  # filter data
+  if(is.null(affected_status_filter)) {
+    to_plot = df %>% filter(tissue == selected_tissue)
+    sample_type = "participants"
+  } else {
+    to_plot = df %>% filter(tissue == selected_tissue & 
+                                   affected_status == affected_status_filter)
+    sample_type = paste0(str_to_lower(affected_status_filter),"s")
+  }
+  
+  # values for informative titles
+  n_individuals = to_plot %>% pull(indv_id) %>% n_distinct()
+  n_samples = to_plot %>% pull(sample) %>% n_distinct()
+  plot_title = paste("Candidate gene list size for", n_individuals, sample_type)
+  plot_subtitle = paste("based on top", top_n, outlier_type, "outliers (abs(Z)>", min_z,") across", n_samples, str_to_lower(selected_tissue), "samples")
+  
+  # make plot
+  p = to_plot %>% 
+    dplyr::select(sample, starts_with("jaccard")) %>% 
+    gather(key="key", value="jaccard", -sample) %>% 
+    separate(key, into=c("x", "builds"), sep="\\.") %>% 
+    mutate(builds = factor(builds, ordered=T, levels=c("hg19_hg38","hg38_chm13"))) %>%  
+    # drop hg19 vs chm13
+    filter(builds != "hg19_chm13") %>% 
+    # plot
+    ggplot() + 
+      geom_histogram(aes(x=jaccard, fill = builds)) +
+      scale_x_continuous(name="Jaccard Similiarity Index") +
+      # scale_y_continuous(trans="log10") +
+      scale_fill_manual(values = c("#d07c10", "#006B2F"), guide = "none") +
+      theme_bw() +
+      ggtitle(plot_title, subtitle = plot_subtitle) +
+      facet_wrap(~builds)
+  
+    if(save_plots){
+      ggsave(paste0("plots/candidate_gene_list_jaccard_top", top_n, "_minz", min_z, ".", selected_tissue, ".", outlier_type, ".", sample_type, ".svg"), p)
+      ggsave(paste0("plots/candidate_gene_list_jaccard_top", top_n, "_minz", min_z, ".", selected_tissue, ".", outlier_type, ".", sample_type, ".png"), p)
+    }
+  
+  return(p)
+  
+}
+
+
+plot_candidate_intersection_size(candidate_comparisons, top_n=top_n, min_z=min_z, selected_tissue="Blood", affected_status_filter="Case", save_plots = T)
+plot_candidate_intersection_size(candidate_comparisons, top_n=top_n, min_z=min_z, selected_tissue="Fibroblast", affected_status_filter="Case", save_plots = T)
+
+```
+
+
+## Rank comparisons
+
+```{r}
+zdiff_dir = "/oak/stanford/groups/smontgom/shared/UDN/Analysis/ReferenceComparisonPrimary/ZscoreDifferences/"
+
+# if zscore_ranks object does not exist, create it in some way
+if(!exists("zscore_ranks")){
+  zrank_file = paste0(zdiff_dir, "alltissues_allbuilds.sorted_opticalDupdedupOptical_minMQ255_rsem.genes.zscore_ranks.txt")
+  # if a zrank file has already been saved, load that as zscore_ranks
+  if(file.exists(zrank_file)){
+    cat("\nReading in previously saved zscore ranks file\n")
+    zscore_ranks = fread(zrank_file)
+  # otherwise, create zscore_ranks by loading and processing the zscores
+  } else {
+    if(!exists("zscores")){
+      cat("\nZscore ranks not found. Loading zscores file for processing\n")
+      zscores = fread(paste0(zdiff_dir, "alltissues_allbuilds.sorted_opticalDupdedupOptical_minMQ255_rsem.genes.zscores.txt"))
+    } else {cat("\nZscores already loaded\n")}
+
+    cat("\nProcessing zscores to ranks\n")
+    zscore_ranks = zscores %>% 
+      # make long
+      dplyr::select(-starts_with("gene_version")) %>% 
+      gather(key = "build", value = "zscore", hg19, hg38, chm13) %>% 
+      # rank zscores per sample (within build and tissue)
+      group_by(across(-c(gene, zscore))) %>% 
+      mutate(rank = dense_rank(desc(abs(zscore)))) %>% 
+      dplyr::select(-zscore) %>% 
+      # spread rank back out by build
+      spread(key=build, value=rank)
+    
+    # add case/control status
+    # if(!exists("metadata")){
+    #   cat("\nLoading metadata\n")
+    #   metadatafile="/oak/stanford/groups/smontgom/shared/UDN/Data/Metadata/2017to2022_metadata.tsv"
+    #   metadata = read_tsv(metadatafile)
+    # } else {cat("\nMetadata already loaded\n")}
+    # cat("\nAdding case/control status\n")
+    # zscore_ranks = zscore_ranks %>% 
+    #   left_join(metadata %>% dplyr::select(sample = sample_id, affected_status))
+    
+    # save
+    zdiff_dir = "/oak/stanford/groups/smontgom/shared/UDN/Analysis/ReferenceComparisonPrimary/ZscoreDifferences/"
+    write_tsv(zscore_ranks, paste0(zdiff_dir, "alltissues_allbuilds.sorted_opticalDupdedupOptical_minMQ255_rsem.genes.zscore_ranks.txt"))
+  }
+}
+
+
+# filter to genes present in the top n in at least one build
+top_n = 20
+
+candidates_ranks = zscore_ranks %>% 
+  filter(hg19 <= top_n | hg38 <= top_n | chm13 <= top_n) # %>% 
+  # create placeholder values for NA
+  # mutate(hg19 = ifelse(is.na(hg19), -1, hg19),
+  #        hg38 = ifelse(is.na(hg38), -1, hg38),
+  #        chm13 = ifelse(is.na(chm13), -1, chm13))
+
+rm(zscore_ranks)
+candidates_ranks %>% head() 
+
+```
+
+### scatter plots
+
+```{r fig.height=5.5, fig.width=6}
+
+hg19_color = "#8C1515"
+hg38_color = "#dea700"
+chm13_color = "#01427a"
+hg38_chm13_color = "#006B2F"
+hg19_hg38_color = "#d07c10"
+
+rank_comparison_figure_rankdiff <- function(candidates_ranks, top_n, build1, build2, colorby="sample", jitter = 0.15){
+  tmp = candidates_ranks %>% 
+    filter(!!as.name(build2) <= top_n | !!as.name(build1) <= top_n) %>% 
+    mutate(status = ifelse(!!as.name(build2) <= top_n & !!as.name(build1) <= top_n &
+                             !!as.name(build2) > 0 & !!as.name(build1) > 0, 
+                         paste0("Top ", top_n, " rank in both builds"), "only in one")) %>% 
+    mutate(status = factor(status, ordered = T, 
+                           levels = c(paste0("Top ", top_n, " rank in both builds"), "only in one"))) %>% 
+    filter(!is.na(status))
+  
+  p = tmp %>% 
+    ggplot(aes_string(x=build2, y=build1, color = colorby)) + 
+      geom_jitter(size = 1.5, alpha = 0.2, width = jitter, height = jitter) + 
+      scale_y_continuous(breaks = scales::pretty_breaks()) +
+      scale_x_continuous(breaks = scales::pretty_breaks()) +
+      theme_bw(base_size=14) +
+      theme(#legend.position = "none",
+            panel.grid.minor = element_blank()) +
+      facet_wrap( tissue ~ status, scales = "free") +
+      ggtitle(paste0("eOutlier Rank Comparison: ", build2, " vs ", build1), 
+              subtitle = "each point is a sample*gene zscore rank")
+  
+  return(p)
+}
+
+
+
+# all
+rank_comparison_figure_rankdiff(candidates_ranks, top_n, "hg38", "hg19", "hg38 - hg19") + 
+  scale_color_gradient2(low = hg19_color, mid = hg19_hg38_color, high = hg38_color)
+
+rank_comparison_figure_rankdiff(candidates_ranks, top_n, "chm13", "hg38", "chm13 - hg38") + 
+  scale_color_gradient2(low = hg38_color, mid = hg38_chm13_color, high = chm13_color)
+
+
+
+
+```
+
+### scatter + distribution
+
+```{r fig.height=5, fig.width=6}
+# plot rank comparison for both in top n
+# with distribution of the difference in ranks
+# and distribution of ranks in the non-top 20 build
+
+rank_comparison_joint_figure <- function(candidates_ranks, top_n, build1, build2, title=NULL, cap_rank_other=NA,
+                                         colorby=NULL, colors=NULL, jitter_by = 0.15, 
+                                         distribution_plot="rank_other_build", save_plots=TRUE){
+  cat("\nFormatting data...\n")
+  tmp = candidates_ranks %>% 
+    filter(!!as.name(build2) <= top_n | !!as.name(build1) <= top_n) %>% 
+    mutate(status = ifelse(!!as.name(build2) <= top_n & !!as.name(build1) <= top_n,
+                           paste0("Top ", top_n, " rank in both builds"), "only in one")) %>% 
+    mutate(status = ifelse(is.na(status), "only in one", status)) %>% 
+    mutate(status = factor(status, ordered = T, 
+                           levels = c(paste0("Top ", top_n, " rank in both builds"), "only in one"))) %>% 
+    # filter(!is.na(status)) %>% 
+    mutate(rank_diff = abs(!!as.name(build1)-!!as.name(build2))) %>% 
+    mutate(other_rank = ifelse(is.na(!!as.name(build1)) | is.na(!!as.name(build2)), 
+                               NA, pmax(!!as.name(build1), !!as.name(build2), na.rm=T))) %>% 
+    mutate(group = paste0("Candidate genes missing:\n", 
+                          scales::comma(n_distinct(gene[is.na(other_rank) & status == "only in one"]))))
+  
+  # optionally cap rank in other build
+  if(!is.na(cap_rank_other)){
+    cat("\nCapping rank in other build to ", cap_rank_other, "...\n")
+    tmp = tmp %>% mutate(other_rank = ifelse(other_rank >= cap_rank_other, cap_rank_other, other_rank))
+  }
+  
+  # make violin plot and 
+  # get rank difference or rank in non-candidate build IQR for violin plot
+  if(distribution_plot=="rank_diff"){
+    v = tmp %>% 
+        filter(status == "only in one") %>% 
+        ggplot(aes(x = group, y=abs(rank_diff))) + 
+          geom_violin(fill = colors[2], color = colors[2], alpha = 0.8) + 
+          geom_boxplot(width=0.1, outlier.size = 0.8) +
+          scale_y_continuous(trans="log10", name = "Absolute difference in rank") +
+          theme_bw(base_size = 14) +
+          theme(axis.title.x = element_blank(),
+                # axis.text.x = element_blank(),
+                axis.ticks.x = element_blank()) +
+          ggtitle(paste0("in one build"))
+    
+    cat("\nAbsolute Rank Difference Distribution:\n")
+    print(tmp %>% 
+            filter(status == "only in one") %>% 
+            mutate(abs_rank_diff = abs(rank_diff)) %>% 
+            pull(abs_rank_diff) %>% 
+            quantile(na.rm=T)
+          )
+    cat("\n")
+  } else if (distribution_plot=="rank_other_build") {
+    v = tmp %>% 
+        filter(status == "only in one") %>% 
+        ggplot(aes(x = group, y = other_rank)) + 
+          geom_violin(fill = colors[2], color = colors[2], alpha = 0.8) + 
+          geom_boxplot(width=0.1, outlier.size = 0.8) +
+          scale_y_continuous(trans="log10", name = "Rank in other build") +
+          theme_bw(base_size = 14) +
+          theme(axis.title.x = element_blank(),
+                #axis.text.x = element_blank(),
+                axis.ticks.x = element_blank()) +
+          ggtitle(paste0("in one build"))
+    
+    cat("\nRank in Other Build Distribution:\n")
+    print(tmp %>% 
+            filter(status == "only in one") %>% 
+            pull(other_rank) %>% 
+            quantile(na.rm=T)
+          )
+    cat("\n")
+  }
+  
+  # function to get r2 annotation
+  cat("\nLinear regression function...\n")
+  lm_eqn <- function(tmp){
+    tmp = tmp %>% filter(status != "only in one") %>% as.data.frame()
+    m <- lm(tmp[, build1] ~ tmp[, build2]);
+    eq <- substitute(italic(r)^2~"="~r2, 
+         list(r2 = formatC(summary(m)$r.squared, format = "e", digits = 1)))
+    as.character(as.expression(eq));
+  }
+  
+  
+  # Plot rank comparison for genes top20-in-both builds
+  cat("\nPrepping rank scatter plot...\n")
+  p = tmp %>% 
+    filter(status != "only in one") %>% 
+    ggplot(aes_string(x=build2, y=build1, color = colorby)) + 
+      geom_jitter(size = 1.5, alpha = 0.2, width = jitter_by, height = jitter_by) + 
+      scale_y_continuous(breaks = scales::pretty_breaks(), name = paste0(build1, " z-score rank")) +
+      scale_x_continuous(breaks = scales::pretty_breaks(), name = paste0(build2, " z-score rank")) + 
+      scale_color_gradient2(low = colors[1], mid = colors[2], high = colors[3]) +
+      theme_bw(base_size=14) +
+      theme(legend.position = "none",
+            panel.grid.minor = element_blank()) +
+      ggtitle(paste0("Top ", top_n, " rank in both builds..."))
+
+  # add label
+  cat("\nCalculating r2...\n")
+  p <- p + geom_text(x = 3, y = top_n, label = lm_eqn(tmp), parse = TRUE)
+  
+  cat("\nCombining plots if needed...\n")
+  if(distribution_plot %in% c("rank_other_build", "rank_diff")){
+    plots = ggarrange(p, v, nrow = 1, widths = c(2,1))
+  } else {
+    plots = p
+  }
+  
+  # add optional title
+  if(!is.null(title)){
+    cat("\nAdding plot title...\n")
+    plots = annotate_figure(plots, top = text_grob(title, face = "bold", size = 20, hjust=0.6))
+  }
+  
+  if(save_plots){
+      ggsave(paste0("plots/candidate_gene_rank_comparisons", ".", build1, "_", build2, 
+                    ".", outlier_type, ".", sample_type, ".svg"), plots)
+      ggsave(paste0("plots/candidate_gene_list_intersect_top", ".", build1, "_", build2, 
+                    ".", outlier_type, ".", sample_type, ".png"), plots)
+    }
+  
+  return(plots)
+}
+
+
+hg19_color = "#8C1515"
+hg38_color = "#dea700"
+chm13_color = "#01427a"
+hg38_chm13_color = "#006B2F"
+hg19_hg38_color = "#d07c10"
+
+rank_comparison_joint_figure(candidates_ranks, top_n, "hg38", "hg19", colorby="hg38 - hg19",
+                             # title = paste0("eOutlier Rank Comparison: hg38 vs hg19"),
+                             colors = c(hg19_color, hg19_hg38_color, hg38_color))
+
+rank_comparison_joint_figure(candidates_ranks, top_n, "chm13", "hg38", colorby="chm13 - hg38",
+                             # title = paste0("eOutlier Rank Comparison: chm13 vs hg38"),
+                             colors = c(hg38_color, hg38_chm13_color, chm13_color))
+
+
+
+```
+
+# Splicing
+
+## load z-scores
+
+```{r}
+metadatafile="/oak/stanford/groups/smontgom/shared/UDN/Data/Metadata/2017to2022_metadata.tsv"
+metadata = read_tsv(metadatafile) %>% dplyr::select(sample = sample_id, affected_status, tissue = source_of_RNA)
+
+splice_z_file = "/oak/stanford/groups/smontgom/shared/UDN/Analysis/ReferenceComparisonPrimary/ZscoreDifferences/alltissues_allbuilds.sorted_opticalDupdedupOptical_minMQ255_rsem.SPLICING.zscores.txt"
+
+if(!file.exists(splice_z_file)){
+  
+  z_hg19 <- fread("/oak/stanford/groups/smontgom/shared/UDN/Output/hg19/Splicing/SplitByInd/all_annotated_adjusted_zscores_collapsedbygenes.hg19.sorted_dedupOptical_minMQ255.bed.gz", header = F, select = c(5, 6, 8), col.names = c("sample", "hg19", "hg19_geneID"))
+  
+  z_hg38 <- fread("/oak/stanford/groups/smontgom/shared/UDN/Output/hg38/Splicing/SplitByInd/all_annotated_adjusted_zscores_collapsedbygenes.hg38.sorted_dedupOptical_minMQ255.bed.gz", header = F, select = c(5, 6, 18), col.names = c("sample", "hg38", "hg38_geneID"))
+  
+  z_chm13 <- fread("/oak/stanford/groups/smontgom/shared/UDN/Output/chm13/Splicing/SplitByInd/all_annotated_adjusted_zscores_collapsedbygenes.chm13.sorted_dedupOptical_minMQ255.bed.gz", header = F, select = c(5, 6, 8), col.names = c("sample", "chm13", "chm13_geneID"))
+  
+  # colnames(sOutliers_hg19) <- c("chr","pos1","pos2","clus","sample","z","enst","gene","x")
+  # colnames(sOutliers_hg38) <- c("chr","pos1","pos2","clus","sample","z","junc","junc_support","strand","splicesite","a","b","c","noveltype","novel_donor","novel_acceptor","enst","gene","x")
+  
+  
+  z_hg19 = z_hg19 %>% mutate(gene = str_remove(hg19_geneID, "\\..*")) %>% dplyr::select(-hg19_geneID)
+  z_hg38 = z_hg38 %>% mutate(gene = str_remove(hg38_geneID, "\\..*")) %>% dplyr::select(-hg38_geneID)
+  z_chm13 = z_chm13 %>% mutate(gene = str_remove(chm13_geneID, "\\..*")) %>% dplyr::select(-chm13_geneID)
+  
+  zscores = full_join(full_join(z_hg19, z_hg38), z_chm13)
+  rm(z_hg19, z_hg38, z_chm13)
+  
+  # add metadata
+  zscores = zscores %>% left_join(metadata)
+  
+  write_tsv(zscores, "/oak/stanford/groups/smontgom/shared/UDN/Analysis/ReferenceComparisonPrimary/ZscoreDifferences/alltissues_allbuilds.sorted_opticalDupdedupOptical_minMQ255_rsem.SPLICING.zscores.txt")
+} else {
+  zscores = fread(splice_z_file)
+}
+
+gc()
+head(zscores)
+```
+
+
+## Gene List Comparisons
+
+```{r}
+# top lists per patient per build
+jaccard <- function(a, b) {
+    intersection = length(intersect(a, b))
+    union = length(a) + length(b) - intersection
+    return (intersection/union)
+}
+
+sect <- function(a, b) {
+  return(length(intersect(a,b)))
+}
+
+candidates = zscores %>% 
+  # head(n=1000) %>% 
+  # make long
+  dplyr::select(-starts_with("gene_version")) %>% 
+  gather(key = "build", value = "zscore", -sample ,-gene, -tissue, -affected_status) %>% 
+  # get the candidate gene lists lists for cases (top 10 genes with |zscore| > 3)
+  group_by(sample, build, tissue) %>% 
+  slice_max(abs(zscore), n = 10) %>%
+  filter(abs(zscore) > 3) %>% 
+  # compare candidate gene lists (top 10 most extreme outliers)
+  summarize(candidates=paste0(gene, collapse = ",")) %>% 
+  # get number of chm13-specific genes in candidate gene lists
+  spread(key = build, value = candidates) %>% 
+  mutate(n_chm13uniq  = length(unlist(str_split(chm13, ","))[!grepl("ENSG", unlist(str_split(chm13, ",")))]) ) %>% 
+  # Calculate candidate gene list size
+  mutate( size.hg19 = length(unlist(str_split(hg19, ","))) ) %>% 
+  mutate( size.hg38 = length(unlist(str_split(hg38, ","))) ) %>% 
+  mutate( size.chm13 = length(unlist(str_split(chm13, ","))) ) %>%
+  # Calculate intersection size
+  mutate( intersect.hg19_hg38 = sect(unlist(str_split(hg19, ",")), unlist(str_split(hg38, ","))) ) %>% 
+  mutate( intersect.hg19_chm13 = sect(unlist(str_split(hg19, ",")), unlist(str_split(chm13, ","))) ) %>% 
+  mutate( intersect.hg38_chm13 = sect(unlist(str_split(hg38, ",")), unlist(str_split(chm13, ","))) ) %>%
+  # Calculate jaccard similarity
+  mutate( jaccard.hg19_hg38 = jaccard(unlist(str_split(hg19, ",")), unlist(str_split(hg38, ","))) ) %>%
+  mutate( jaccard.hg19_chm13 = jaccard(unlist(str_split(hg19, ",")), unlist(str_split(chm13, ","))) ) %>%
+  mutate( jaccard.hg38_chm13 = jaccard(unlist(str_split(hg38, ",")), unlist(str_split(chm13, ","))) ) %>%
+  ungroup()
+
+```
+
+### make plots
+
+```{r fig.height=3, fig.width=6}
+candidates %>% 
+  dplyr::select(sample, starts_with("size")) %>% 
+  gather(key="key",value="size", -sample) %>% 
+  separate(key, into=c("x", "builds"), sep="\\.") %>% 
+  mutate(builds = factor(builds, ordered=T, levels=c("hg19","hg38","chm13"))) %>% 
+  ggplot() + 
+    geom_histogram(aes(x=size, fill = builds)) +
+    scale_x_continuous(name="# Genes in build candidate gene list", trans="log10") +
+    # scale_y_continuous(trans="log10") +
+    scale_fill_manual(values = c("#8C1515", "#dea700", "#01427a"), guide = "none") +
+    theme_bw() +
+    ggtitle("Candidate gene list size for 171 cases", 
+            subtitle = "Based on expression outliers across 282 blood samples") +
+    facet_wrap(~builds)
+```
+
+```{r fig.height=3, fig.width=6}
+candidates %>% 
+  # format intersection sizes for plotting
+  dplyr::select(sample, starts_with("intersect")) %>% 
+  gather(key="key",value="intersect", -sample) %>% 
+  separate(key, into=c("x", "builds"), sep="\\.") %>% 
+  # drop hg19 vs chm13
+  filter(builds != "hg19_chm13") %>% 
+  # set order
+  mutate(builds = factor(builds, ordered=T, levels=c("hg19_hg38","hg38_chm13"))) %>% 
+  # plot
+  ggplot() + 
+    geom_histogram(aes(x=intersect, fill = builds)) +
+    scale_x_continuous(name="# Genes in both candidate gene lists", trans="log10") +
+    scale_fill_manual(values = c("#d07c10", "#006B2F"), guide = "none") +
+    theme_bw() +
+    ggtitle("Candidate gene list intersection size for 171 cases", 
+            subtitle = "Based on expression outliers across 282 blood samples") +
+    facet_wrap(~builds)
+```
+
+```{r fig.height=3, fig.width=6}
+candidates %>% 
+  dplyr::select(sample, starts_with("jaccard")) %>% 
+  gather(key="key",value="jaccard", -sample) %>% 
+  separate(key, into=c("x", "builds"), sep="\\.") %>% 
+  # drop hg19 vs chm13
+  filter(builds != "hg19_chm13") %>% 
+  # set order
+  mutate(builds = factor(builds, ordered=T, levels=c("hg19_hg38","hg38_chm13"))) %>% 
+  # plot
+  ggplot() + 
+    geom_histogram(aes(x=jaccard, fill = builds)) +
+    scale_x_continuous(limits = c(0,1), name="Jaccard Similarity Index") +
+      scale_fill_manual(values = c("#d07c10", "#006B2F"), guide = "none") +
+    theme_bw() +
+    ggtitle("Candidate gene list similarity for 171 cases", 
+            subtitle = "Based on expression outliers across 282 blood samples") +
+    facet_wrap(~builds, scales = "free")
+
+```
+
+```{r}
+# top lists per patient per build
+jaccard <- function(a, b) {
+    intersection = length(intersect(a, b))
+    union = length(a) + length(b) - intersection
+    return (intersection/union)
+}
+
+sect <- function(a, b) {
+  return(length(intersect(a,b)))
+}
+
+if(!exists("zscores")){
+  zscores = fread("/oak/stanford/groups/smontgom/shared/UDN/Analysis/ReferenceComparisonPrimary/ZscoreDifferences/alltissues_allbuilds.sorted_opticalDupdedupOptical_minMQ255_rsem.genes.zscores.txt")
+}
+
+candidates = zscores %>% 
+  # make long
+  dplyr::select(-starts_with("gene_version")) %>% 
+  gather(key = "build", value = "zscore", -sample ,-gene) %>% 
+  # get the candidate gene lists lists for cases (top 10 genes with |zscore| > 3)
+  group_by(sample, build, tissue) %>% 
+  slice_max(abs(zscore), n = 10) %>%
+  filter(abs(zscore) > 3) %>% 
+  # compare candidate gene lists (top 10 most extreme outliers)
+  summarize(candidates=paste0(gene, collapse = ",")) %>% 
+  # get number of chm13-specific genes in candidate gene lists
+  spread(key = build, value = candidates) %>% 
+  mutate(n_chm13uniq  = length(unlist(str_split(chm13, ","))[!grepl("ENSG", unlist(str_split(chm13, ",")))]) ) %>% 
+  # Calculate candidate gene list size
+  mutate( size.hg19 = length(unlist(str_split(hg19, ","))) ) %>% 
+  mutate( size.hg38 = length(unlist(str_split(hg38, ","))) ) %>% 
+  mutate( size.chm13 = length(unlist(str_split(chm13, ","))) ) %>%
+  # Calculate intersection size
+  mutate( intersect.hg19_hg38 = sect(unlist(str_split(hg19, ",")), unlist(str_split(hg38, ","))) ) %>% 
+  mutate( intersect.hg19_chm13 = sect(unlist(str_split(hg19, ",")), unlist(str_split(chm13, ","))) ) %>% 
+  mutate( intersect.hg38_chm13 = sect(unlist(str_split(hg38, ",")), unlist(str_split(chm13, ","))) ) %>%
+  # Calculate jaccard similarity
+  mutate( jaccard.hg19_hg38 = jaccard(unlist(str_split(hg19, ",")), unlist(str_split(hg38, ","))) ) %>% 
+  mutate( jaccard.hg19_chm13 = jaccard(unlist(str_split(hg19, ",")), unlist(str_split(chm13, ","))) ) %>% 
+  mutate( jaccard.hg38_chm13 = jaccard(unlist(str_split(hg38, ",")), unlist(str_split(chm13, ","))) ) %>% 
+  ungroup()
+```
+
+## Rank comparisons
+
+```{r}
+zdiff_dir = "/oak/stanford/groups/smontgom/shared/UDN/Analysis/ReferenceComparisonPrimary/ZscoreDifferences/"
+
+# if zscore_ranks object does not exist, create it in some way
+if(!exists("zscore_ranks")){
+  zrank_file =  paste0(zdiff_dir, "alltissues_allbuilds.sorted_opticalDupdedupOptical_minMQ255_rsem.SPLICING.zscore_ranks.txt")
+  # if a zrank file has already been saved, load that as zscore_ranks
+  if(file.exists(zrank_file)){
+    cat("\nReading in previously saved zscore ranks file\n")
+    zscore_ranks = fread(zrank_file)
+  # otherwise, create zscore_ranks by loading and processing the zscores
+  } else {
+    if(!exists("zscores")){
+      cat("\nZscore ranks not found. Loading zscores file for processing\n")
+      zscores = fread(paste0(zdiff_dir, "alltissues_allbuilds.sorted_opticalDupdedupOptical_minMQ255_rsem.SPLICING.zscores.txt"))
+    } else {cat("\nZscores already loaded\n")}
+
+    cat("\nProcessing zscores to ranks\n")
+    zscore_ranks = zscores %>% 
+      # make long
+      dplyr::select(-starts_with("gene_version")) %>% 
+      gather(key = "build", value = "zscore", -sample ,-gene, -tissue) %>% 
+      # rank zscores per sample (within build and tissue)
+      group_by(sample, build, tissue) %>% 
+      mutate(rank = dense_rank(desc(abs(zscore)))) %>% 
+      dplyr::select(-zscore) %>% 
+      # spread rank back out by build
+      spread(key=build, value = rank)
+    
+    # add case/control status
+    if(!exists("metadata")){
+      cat("\nLoading metadata\n")
+      metadatafile="/oak/stanford/groups/smontgom/shared/UDN/Data/Metadata/2017to2022_metadata.tsv"
+      metadata = read_tsv(metadatafile)
+    } else {cat("\nMetadata already loaded\n")}
+    cat("\nAdding case/control status\n")
+    zscore_ranks = zscore_ranks %>% 
+      left_join(metadata %>% dplyr::select(sample = sample_id, affected_status))
+    
+    # save
+    write_tsv(zscore_ranks, zrank_file)
+  }
+}
+
+# filter to genes present in the top n in at least one build
+top_n = 20
+
+candidates_ranks = zscore_ranks %>% 
+  filter(hg19 <= top_n | hg38 <= top_n | chm13 <= top_n)# %>% 
+  # create placeholder values for NA
+  # mutate(hg19 = ifelse(is.na(hg19), -1, hg19),
+  #        hg38 = ifelse(is.na(hg38), -1, hg38),
+  #        chm13 = ifelse(is.na(chm13), -1, chm13))
+
+rm(zscore_ranks)
+gc()
+candidates_ranks %>% head() 
+
+```
+
+### scatter + distribution
+
+```{r fig.height=4, fig.width=5}
+# plot rank comparison for both in top n
+# with distribution of the difference in ranks
+# and distribution of ranks in the non-top 20 build
+
+hg19_color = "#8C1515"
+hg38_color = "#dea700"
+chm13_color = "#01427a"
+hg38_chm13_color = "#006B2F"
+hg19_hg38_color = "#d07c10"
+
+candidates_ranks_cases = candidates_ranks %>% filter(affected_status == "Case")
+
+ggplot(candidates_ranks_cases, aes(x=chm13)) + geom_histogram() + scale_x_continuous(trans="log10")
+ggplot(candidates_ranks_cases, aes(x=hg38)) + geom_histogram() + scale_x_continuous(trans="log10")
+ggplot(candidates_ranks_cases, aes(x=hg19)) + geom_histogram() + scale_x_continuous(trans="log10")
+
+candidates_ranks_cases %>% filter(chm13 <= 20 & hg38 <= 20) %>% ggplot(aes(x=chm13, y=hg38)) + geom_point(alpha = 0.1)
+candidates_ranks_cases_discordant %>% ggplot(aes(y = rank_in_other, x=group)) + geom_violin() + scale_y_continuous(trans="log10")
+candidates_ranks_cases %>% filter(chm13 > 20 | hg38 > 20) %>% mutate(rank_diff = abs(chm13-hg38), group = "other build") %>% ggplot(aes(y = rank_diff, x=group)) + geom_violin() + scale_y_continuous(trans="log10")
+
+# hg19
+rank_comparison_joint_figure(candidates_ranks_cases, top_n, "hg38", "hg19",
+                             colorby="hg38 - hg19", colors = c(hg19_color, hg19_hg38_color, hg38_color))
+
+rank_comparison_joint_figure(candidates_ranks_cases, top_n, "hg38", "hg19", cap_rank_other = 1000,
+                             colorby="hg38 - hg19", colors = c(hg19_color, hg19_hg38_color, hg38_color))
+
+# chm13
+rank_comparison_joint_figure(candidates_ranks_cases, top_n, "chm13", "hg38", colorby="chm13 - hg38",
+                             colors = c(hg38_color, hg38_chm13_color, chm13_color))
+
+rank_comparison_joint_figure(candidates_ranks_cases, top_n, "chm13", "hg38", colorby="chm13 - hg38",
+                             colors = c(hg38_color, hg38_chm13_color, chm13_color))
+
+
+```
+
+## Done
+
+```{r}
+```
+

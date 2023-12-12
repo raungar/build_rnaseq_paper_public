@@ -1,0 +1,640 @@
+---
+title: "UDN HG38 HG19 Diff Exp"
+author: "P Goddard"
+date: '2022-07-10'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+# library(data.table)
+library(ggrepel)
+library(ggplot2)
+library(ggforce)
+library(ggExtra) # ggMarginal
+library(ggpubr) # ggarrange
+library(Rgb) # read.gtf
+library("biomaRt")
+library(ggrepel)
+library(tidyr)
+library(purrr)
+library(readr)
+library(stringr)
+library(tibble)
+library(forcats)
+library(dplyr)
+library(data.table)
+
+`%notin%` <- Negate(`%in%`)
+
+```
+
+# Read in Data
+
+```{r}
+inputdir="/Volumes/groups/smontgom/shared/UDN/Analysis/ReferenceComparisonPrimary/TPMDifferences/output/01C_LIMMA_DiffExp/"
+savedir="/Volumes/groups/smontgom/shared/UDN/Analysis/ReferenceComparisonPrimary/TPMDifferences/output/01C_LIMMA_DiffExp/"
+blood_file=paste0(inputdir, "Blood.dedupOptical_minMQ255.diff_expression_chm13ensembl_vs_hg38.limma_voom_dream.all.txt.gz")
+fib_file=paste0(inputdir, "Fibroblast.dedupOptical_minMQ255.diff_expression_chm13ensembl_vs_hg38.limma_voom_dream.all.txt.gz")
+
+blood_file=paste0(inputdir, "Blood_diff_expression.limma_voom_dream.all.txt")
+fib_file=paste0(inputdir, "Fibroblast_diff_expression.limma_voom_dream.all.txt")
+
+blood = fread(blood_file)
+fib = fread(fib_file)
+```
+
+# LogFC Threshold Elbow Plot
+
+```{r fig.height=3, fig.width=6}
+merged_long = rbind(fib %>% mutate(tissue = "Fibroblasts"), 
+                    blood %>% mutate(tissue = "Blood"))
+
+# alpha = 0.05
+
+for (alpha in c(0.05, 0.01)) {
+  
+  logFC_thresholds = merged_long %>% 
+    dplyr::select(gene, tissue, AveExpr, logFC, adj.P.Val) %>% 
+    # get the least extreme measures of both tissues
+    rbind(merged_long %>% 
+        group_by(gene) %>% 
+        summarize(adj.P.Val = max(adj.P.Val, na.rm=T),
+                  logFC = min(abs(logFC)),
+                  AveExpr = mean(AveExpr)) %>% 
+        ungroup() %>% 
+        mutate(tissue = "Both")
+    ) %>% 
+    group_by(tissue) %>% 
+    summarize(`0.1` = sum(adj.P.Val <= !!alpha & abs(logFC) >= 0.1),
+              `0.25` = sum(adj.P.Val <= !!alpha & abs(logFC) >= 0.25),
+              `0.5` = sum(adj.P.Val <= !!alpha & abs(logFC) >= 0.5),
+              `0.75` = sum(adj.P.Val <= !!alpha & abs(logFC) >= 0.75),
+              `1.0` = sum(adj.P.Val <= !!alpha & abs(logFC) >= 1.0),
+              `1.25` = sum(adj.P.Val <= !!alpha & abs(logFC) >= 1.25),
+              `1.5` = sum(adj.P.Val <= !!alpha & abs(logFC) >= 1.5),
+              `1.75` = sum(adj.P.Val <= !!alpha & abs(logFC) >= 1.75),
+              `2` = sum(adj.P.Val <= !!alpha & abs(logFC) >= 2.0),
+              `2.25` = sum(adj.P.Val <= !!alpha & abs(logFC) >= 2.25),
+              `2.5` = sum(adj.P.Val <= !!alpha & abs(logFC) >= 2.5),
+              `2.75` = sum(adj.P.Val <= !!alpha & abs(logFC) >= 2.75),
+              `3` = sum(adj.P.Val <= !!alpha & abs(logFC) >= 3)) %>% 
+    gather(key = "logFC_threshold", value = "n_sig_genes", -tissue) %>% 
+    mutate(p_adj_threshold = !!alpha) %>% 
+    mutate(logFC_threshold = as.numeric(logFC_threshold)) 
+    # spread(key = tissue, value = n_sig_genes)
+    
+  p = logFC_thresholds %>% 
+    ggplot(aes(x = logFC_threshold, y = n_sig_genes)) + 
+    geom_point(size = 3) + 
+    geom_line() + 
+    geom_text_repel(aes(label = n_sig_genes), nudge_x = 0.25, nudge_y = 0.25) +
+    facet_wrap(~ tissue) +
+    ggtitle(paste0("# Genes with sig different expression (P.adj <= ", alpha, ")"))
+  
+  print(p)
+  
+  ggsave(plot = p, filename = paste0(savedir, "logFC_elbowplot_alpha0", alpha*10, ".png"))
+}
+  
+```
+
+# Decide thresholds
+
+```{r}
+alpha = 0.01
+logFC_loose = 1
+logFC_strict = 2
+
+```
+
+# Get genes sig in both tissues
+
+```{r}
+merged_wide = blood %>% 
+  dplyr::select(gene, 
+                blood_logFC = logFC, 
+                blood_P.value = P.Value, 
+                blood_adj.P.Val = adj.P.Val
+                ) %>% 
+  full_join(fib %>% 
+              dplyr::select(gene, 
+                            fib_logFC = logFC, 
+                            fib_P.value = P.Value, 
+                            fib_adj.P.Val = adj.P.Val)) %>% 
+  
+  mutate(blood_sig = blood_adj.P.Val <= !!alpha & 
+           abs(blood_logFC) >= !!logFC_loose) %>% 
+  
+  mutate(blood_sig_strict = blood_adj.P.Val <= !!alpha & 
+           abs(blood_logFC) >= !!logFC_strict) %>%
+  
+  mutate(fib_sig = fib_adj.P.Val <= !!alpha & 
+           abs(fib_logFC) >= !!logFC_loose) %>% 
+  
+  mutate(fib_sig_strict = blood_adj.P.Val <= !!alpha & 
+           abs(fib_logFC) >= !!logFC_strict) %>%
+  
+  mutate(both_sig = blood_sig & fib_sig) %>%
+  mutate(both_sig_strict = blood_sig_strict & fib_sig_strict)
+
+blood_sig = merged_wide %>% filter(blood_sig == T) %>% pull(gene)
+fib_sig = merged_wide %>% filter(fib_sig == T) %>% pull(gene)
+both_sig = merged_wide %>% filter(both_sig == T) %>% pull(gene)
+
+blood_sig_strict = merged_wide %>% filter(blood_sig_strict == T) %>% pull(gene)
+fib_sig_strict = merged_wide %>% filter(fib_sig_strict == T) %>% pull(gene)
+both_sig_strict = merged_wide %>% filter(both_sig_strict == T) %>% pull(gene)
+
+```
+
+# Volcano Plots
+
+```{r fig.height=5, fig.width=7}
+# volcano plot (original vibe)
+blood %>% 
+  mutate(logpval = ifelse(P.Value == 0, 300, -log10(P.Value))) %>%
+  mutate(sig_pval = adj.P.Val <= !!alpha & abs(logFC) >= !!logFC_loose) %>% 
+  mutate(status = ifelse(adj.P.Val <= !!alpha & 
+                         abs(logFC) >= !!logFC_strict, paste0("abs(logFC)>",!!logFC_strict),
+                                ifelse(adj.P.Val <= !!alpha & abs(logFC) >= !!logFC_loose, 
+                                       paste0("abs(logFC)>",!!logFC_loose), "Not significant"))) %>% 
+  mutate(both_sig = gene %in% both_sig) %>% 
+  ggplot() +
+  geom_point(data = function(x) subset(x, both_sig == T),
+             aes(x = logFC, y = logpval, alpha = sig_pval, color = status),
+             size = 4, shape = 1, color = "black") +
+  geom_point(aes(x = logFC, y = logpval, alpha = sig_pval, color = status),
+             size = 3) +
+  theme_bw(base_size=20) +
+  scale_alpha_manual(values = c(0.3, 0.7)) +
+  scale_color_manual(values = c("#B83A4B","#820000","ivory4"))
+```
+
+```{r fig.height=4, fig.width=6}
+
+make_volcano_plot <- function(df, logFC_loose, logFC_strict, alpha, color_scheme = c("#E07F80","#8C1515","ivory4"), both_sig = NA){
+  df2 = df %>% 
+    # Clean up ridiculously small p-values
+    mutate(logpval = ifelse(P.Value == 0, 300, -log10(P.Value))) %>%
+    
+    # Add indicator for any significant genes
+    mutate(sig_pval = adj.P.Val <= !!alpha & abs(logFC) >= !!logFC_loose) %>% 
+    
+    # Create more nuanced thresholds
+    mutate(status = ifelse(adj.P.Val <= !!alpha & abs(logFC) >= !!logFC_strict, 
+                           paste0("abs(logFC)>",!!logFC_strict),
+                           ifelse(adj.P.Val <= !!alpha & abs(logFC) >= !!logFC_loose, 
+                                  paste0("abs(logFC)>",!!logFC_loose),
+                                  "Not significant"))) 
+  print(paste0("Number of significant genes at loose FC threshold: ",nrow(df2%>%dplyr::filter(status!="Not significant" & adj.P.Val<0.01))))
+  print(paste0("Number of significant genes at strict FC threshold: ",nrow(df2%>%dplyr::filter(status==paste0("abs(logFC)>",!!logFC_strict) & adj.P.Val<0.01))))
+    
+  # Mark genes significant in both tissues (if provided)
+  if(!is.na(both_sig)){
+   df2 = df2 %>% mutate(both_sig = gene %in% both_sig)
+  }
+  
+  # Plot all data
+  p = df2 %>% 
+    ggplot() +
+      geom_point(aes(x = logFC, y = logpval, alpha = sig_pval, fill = status),
+                 size = 3, shape = 21, stroke = 0)
+  
+  # If both_sig provided, highlight genes
+  if(!is.na(both_sig)){
+    # Highlight genes significant in both analyses (but hide legend to avoid circle borders in fill legend)
+    p = p + geom_point(data = function(x) subset(x, both_sig == T),
+                       aes(x = logFC, y = logpval, alpha = sig_pval, fill = status),
+                       size = 3, shape = 21, stroke = 0.5, stroke = 1, color = "black",
+                       alpha = 0.2, show.legend = FALSE)
+    
+    # Add dummy geom to create the "Sig in both" legend
+    p = p + geom_point(data = function(x) subset(x, both_sig == T),
+                 aes(x = logFC, y = logpval, alpha = sig_pval, color = both_sig),
+                 size = 3, shape = 21, stroke = 0.5)
+    
+    # Clarify legend
+    p = p + scale_color_manual(values = "black", labels = "significant in both", name = "")
+
+  }
+  
+  # Theming and ~ a e s t h e t i c ~
+  p = p + theme_bw(base_size=20)
+  p = p + scale_alpha_manual(values = c(0.4, 0.7), guide = "none")
+  p = p + scale_fill_manual(values = color_scheme)
+  p = p + theme(legend.title = element_blank())
+  
+  return(p)
+}
+
+
+volcano_blood = make_volcano_plot(blood, logFC_loose, logFC_strict, alpha, c("#E07F80","#8C1515","ivory4"), both_sig)
+
+volcano_fib = make_volcano_plot(fib, logFC_loose, logFC_strict, alpha, c("#67AFD2","#016895","ivory4"), both_sig)
+
+both = ggarrange(volcano_blood + theme(legend.position = "bottom",
+                                       legend.direction = "vertical",
+                                       legend.justification = "center",
+                                       legend.box = "vertical",
+                                       legend.spacing.y = unit(-0.25, "cm")), 
+                 volcano_fib + theme(axis.title.y = element_blank(),
+                                     legend.position = "bottom",
+                                     legend.direction = "vertical",
+                                     legend.justification = "center",
+                                     legend.box = "vertical",
+                                     legend.spacing.y = unit(-0.25, "cm")),
+                 vjust=0.8, labels = c("BLOOD", "FIBROBLASTS"))
+
+volcano_blood
+volcano_fib
+both
+
+```
+
+```{r}
+# save plots
+ggsave(plot = both, filename = paste0(savedir, "volcano_plots_both_hg38_chm13ensembl.png"), height = 7, width = 9)
+ggsave(plot = volcano_blood, filename = paste0(savedir, "volcano_plots_blood_hg38_chm13ensembl.png"))
+ggsave(plot = volcano_fib, filename = paste0(savedir, "volcano_plots_fibroblast_hg38_chm13ensembl.png"))
+```
+
+
+--- MAKE NEW SCRIPT ---
+
+# Annotate
+
+## Gene Names
+
+```{r}
+mart <- useEnsembl(biomart = "ensembl",
+                   dataset = "hsapiens_gene_ensembl", 
+                   mirror = "useast")
+mybm=getBM(attributes = c("ensembl_gene_id", "hgnc_symbol"),
+           mart = mart)
+
+# create hgnc- > ensembl dictionary
+hgnc_to_ensg <- mybm$ensembl_gene_id
+names(hgnc_to_ensg) <- mybm$hgnc_symbol
+hgnc_to_ensg["CBSL"]<-hgnc_to_ensg["CBS"]
+hgnc_to_ensg["SMIM11A"]<-hgnc_to_ensg["SMIM11"]
+hgnc_to_ensg["SMIM11B"]<-hgnc_to_ensg["SMIM11"]
+
+# create ensembl > hgnc dictionary
+ensg_to_hgnc <- names(hgnc_to_ensg)
+names(ensg_to_hgnc) = hgnc_to_ensg
+```
+
+```{r}
+merged_annot = merged_long %>%  mutate(gene=str_replace(gene,"\\.[0-9]+",""))%>%
+  mutate(gene_name = ensg_to_hgnc[gene])
+```
+
+## check gene versions
+
+```{r}
+# read and reformat discrepant gene version data
+discrep_vers = read_tsv(paste0(inputdir, "../01B_PreppedCountData/Blood_different_gene_versions_hg38_hg19.txt"))
+colnames(discrep_vers) = c('gene', 'gene_version', 'hg19', 'hg38')
+discrep_vers = discrep_vers %>% gather(key = 'build', value = 'count', hg19, hg38) %>% 
+  drop_na() %>% 
+  dplyr::select(-count) %>% 
+  spread(key = build, value = gene_version)
+head(discrep_vers)
+```
+
+```{r}
+blood_sig[blood_sig %in% discrep_vers$gene] %>% length() # 31
+fib_sig[fib_sig %in% discrep_vers$gene] %>% length()     # 33
+both_sig[both_sig %in% discrep_vers$gene] %>% length()   # 21
+
+
+merged_annot2 = merged_annot %>% 
+  mutate(diff_version = ifelse(gene %in% discrep_vers$gene, "Yes", NA)) %>% 
+  left_join(discrep_vers %>% dplyr::rename(hg19_version = hg19, hg38_version = hg38))
+
+```
+
+## Discrep SNPs
+
+```{r}
+ref_dir="/Volumes/groups/smontgom/shared/UDN/ReferenceFiles/"
+discreps_snps = fread(paste0(ref_dir, "exome_discrep_enriched_genes_li2021.txt")) %>% 
+  mutate(gene = hgnc_to_ensg[gene])
+```
+
+
+```{r}
+merged_annot2 = merged_annot %>% 
+  # mutate(hgnc = ensg_to_hgnc[gene]) %>% 
+  left_join(discreps_snps %>%
+              mutate(discrep_var_enriched = "Yes") %>% 
+              dplyr::select(gene, discrep_var_enriched), 
+              # dplyr::select(ensg,discrep_var_enriched, discrep_known_omim_gene = known_omim_gene),
+            by = c("gene"="gene"))
+  # mutate(discrep_known_omim_gene = ifelse(discrep_known_omim_gene=="No", 
+  #                                      NA, discrep_known_omim_gene)) %>% 
+
+```
+
+
+## OMIM
+
+```{r}
+ref_dir="/Volumes/groups/smontgom/shared/UDN/ReferenceFiles/"
+pheno2gene="morbidmap.txt"
+pheno = fread(paste0("grep -v '^#' ", ref_dir, pheno2gene))
+colnames(pheno) = c("pheno","gene","mim","cyto")
+```
+
+```{r}
+pheno_clean = pheno %>% 
+  extract(pheno, into = c("pheno", "confidence"), "(.*) \\(([0-9]+)\\)$") %>%
+  mutate(confidence = as.numeric(confidence)) %>% 
+  extract(pheno, into = c("pheno", "pheno_mim"), "(.*), ([0-9]{6})$") %>% 
+  mutate(status = ifelse(confidence == 1, "association", 
+                         ifelse(confidence == 2, "linakge_mapping", 
+                                ifelse(confidence == 3, "known_molec_cause", 
+                                       ifelse(confidence == 4, "del_dup_syndrome", NA))))) %>% 
+  separate_rows(gene, convert = T, sep=", ") %>% 
+  dplyr::select(-mim) %>% 
+  mutate(ensg = hgnc_to_ensg[gene]) %>% 
+  distinct() %>% 
+  # add something to fill down ensg within groups
+  group_by(pheno, pheno_mim, confidence, status, cyto) %>% 
+  mutate(approved_symbol = ifelse(!is.na(ensg), gene, NA)) %>% 
+  summarize(ensg = toString(na.omit(ensg)),
+            approved_symbol = toString(na.omit(approved_symbol)),
+            hgnc = toString(na.omit(gene))) %>% 
+  ungroup() %>% 
+  separate_rows(ensg, approved_symbol, convert=T, sep=", ") %>% 
+  group_by(ensg, hgnc, approved_symbol) %>% 
+  summarize(pheno = toString(unique(na.omit(pheno))),
+            pheno_mim  = toString(unique(na.omit(pheno_mim ))),
+            confidence = toString(unique(na.omit(confidence))),
+            status = toString(unique(na.omit(status)))) %>% 
+  ungroup()
+
+
+```
+
+```{r}
+merged_annot = merged_annot %>% 
+  left_join(pheno_clean %>% 
+              dplyr::select(ensg, omim_trait = pheno, pheno_mim, confidence, status), 
+            by = c("gene"="ensg")) %>% 
+  mutate(known_omim_gene = ifelse(confidence >= 3, "Yes", NA)) 
+```
+
+rachel code
+```{r}
+
+print(paste0("Dif Exp Blood: ",merged_annot%>%dplyr::filter(abs(logFC)>1&adj.P.Val<0.05&!str_detect(gene_name,"MT-"))%>%
+               dplyr::filter(tissue=="Blood")%>%nrow()))
+print(paste0("Dif Exp Fibroblast: ",merged_annot%>%dplyr::filter(abs(logFC)>1&adj.P.Val<0.01&!str_detect(gene_name,"MT-"))%>%
+               dplyr::filter(tissue=="Fibroblasts")%>%nrow()))             
+print(paste0("Intersection of dif exp: ",merged_annot%>%dplyr::filter(abs(logFC)>1&adj.P.Val<0.01&!str_detect(gene_name,"MT-"))%>%select(gene,tissue)%>%group_by(gene)%>%mutate(n=n())%>%dplyr::filter(n>1)%>%pull(gene)%>%unique()%>%length()))
+             
+print(paste0("Number of omim genes blood: ",merged_annot%>%dplyr::filter(known_omim_gene=="Yes"&abs(logFC)>1&adj.P.Val<0.01&!str_detect(gene_name,"MT-"))%>%
+               dplyr::filter(tissue=="Blood")%>%nrow()))
+print(paste0("Number of omim genes fibroblast: ",merged_annot%>%dplyr::filter(known_omim_gene=="Yes"&abs(logFC)>1&adj.P.Val<0.01&!str_detect(gene_name,"MT-"))%>%
+               dplyr::filter(tissue=="Fibroblasts")%>%nrow()))
+print(paste0("Number of uniq omim genes between both blood and fibroblast (union): "
+             ,merged_annot%>%dplyr::filter(known_omim_gene=="Yes"&abs(logFC)>1&adj.P.Val<0.01&!str_detect(gene_name,"MT-"))%>%pull(gene)%>%unique()%>%length()))
+print(paste0("Number of overlap omim genes  both blood and fibroblast (intersect): "
+             ,merged_annot%>%dplyr::filter(known_omim_gene=="Yes"&abs(logFC)>1&adj.P.Val<0.01&!str_detect(gene_name,"MT-"))%>%
+               select(gene,tissue)%>%group_by(gene)%>%mutate(n=n())%>%dplyr::filter(n>1)%>%pull(gene)%>%unique()%>%length()))
+
+```
+
+<!-- # ANI -->
+
+```{r}
+
+```
+
+## Build Updates
+
+```{r}
+ref_dir = "/Volumes/groups/smontgom/shared/UDN/Analysis/ReferenceComparisonPrimary/ReferenceFiles/"
+hg38diff = fread(paste0(ref_dir, "hg38_gencodev35primary_hg19contigdiffs_intersect.geneTable.txt")) %>% 
+  dplyr::rename(ensg = gene_id) %>% 
+  mutate(gene = str_remove(ensg, "\\..*$"))
+
+merged_annot = merged_annot %>% 
+  left_join(hg38diff %>% 
+              dplyr::select(gene, contig_id, contig_start, contig_end, build_change)) %>% 
+  mutate(documented_change = ifelse(!is.na(build_change), "yes", NA)) %>% 
+  distinct()
+        
+
+```
+
+## Sig Gene Group
+
+```{r}
+merged_annot = merged_annot %>% 
+  mutate(sig_tissue = ifelse(gene %in% both_sig, "Both",
+                             ifelse(gene %in% blood_sig, "Blood",
+                                    ifelse(gene %in% fib_sig, "Fibroblast", NA))))
+```
+
+# Summary Table
+
+```{r}
+merged_annot %>% 
+  mutate(Both = ifelse(gene %in% both_sig_strict, "LogFC>2",
+                       ifelse(gene %in% both_sig, "LogFC>1", NA))) %>% 
+  
+  mutate(Blood = ifelse(gene %in% blood_sig_strict, "LogFC>2",
+                       ifelse(gene %in% blood_sig, "LogFC>1", NA))) %>% 
+  
+  mutate(Fibroblast = ifelse(gene %in% fib_sig_strict, "LogFC>2",
+                       ifelse(gene %in% fib_sig, "LogFC>1", NA))) %>% 
+
+  gather(key = "tissue", value = "threshold", Both:Fibroblast) %>% 
+  
+  dplyr::select(gene, gene_name, tissue, threshold,
+                build_change, documented_change, diff_version,
+                discrep_var_enriched, known_omim_gene) %>%
+  
+  distinct() %>% 
+  
+  # get stats per tissue
+  group_by(tissue) %>% 
+  summarise(sig = n_distinct(gene[!is.na(threshold)],
+                             na.rm=T),
+            sig_strict = n_distinct(gene[threshold == "LogFC>2"],
+                                     na.rm=T),
+            build_change_new = n_distinct(gene[!is.na(threshold) & 
+                                                 build_change == "new_contig_added"], 
+                                     na.rm=T),
+            build_change_errors = n_distinct(gene[!is.na(threshold) & 
+                                                    build_change == "hg19_errors_corrected"], 
+                                             na.rm=T),
+            build_change_parts = n_distinct(gene[!is.na(threshold) & 
+                                                   build_change == "diff_parts_same_contig"], 
+                                             na.rm=T),
+            # diff_gene_version = n_distinct(gene[!is.na(threshold) & 
+            #                                       !is.na(diff_version)], 
+             #                                na.rm=T),
+            discrep_var = n_distinct(gene[!is.na(threshold) & 
+                                            !is.na(discrep_var_enriched)], 
+                                             na.rm=T),
+            omim_gene = n_distinct(gene[!is.na(threshold) & 
+                                          !is.na(known_omim_gene)], 
+                                             na.rm=T)
+            ) %>% 
+  column_to_rownames("tissue") %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  dplyr::select(Blood, Fibroblast, Both)
+
+```
+
+```{r}
+# get omim genes
+
+merged_annot %>% 
+  filter(!is.na(known_omim_gene)) %>% 
+  filter(!is.na(sig_tissue)) %>% 
+  dplyr::select(-contig_start, -contig_end, -t, -z.std, -P.Value) %>% 
+  group_by(across(c(-contig_id, -build_change))) %>% 
+  summarize(contig_id = toString(unique(na.omit(contig_id))),
+            build_change  = toString(unique(na.omit(build_change )))
+            ) %>% 
+  ungroup() %>% 
+  distinct() %>% 
+  gather(key="key", value="value", logFC:adj.P.Val) %>% 
+  unite(col = "newkey", tissue, key) %>% 
+  spread(key = newkey, value = value) %>% 
+  arrange(sig_tissue)
+
+```
+
+# Viz Intersections
+
+## Venn Diagrams
+
+```{r}
+create_venn_diagram = function(df, tissue, tissue_color, sig_gene_list){
+  # reason sets
+  diff_gene_versions = df %>%
+    filter(!is.na(diff_version)) %>%
+    filter(sig_tissue == !!tissue) %>%
+    pull(gene) %>% unique()
+  
+  build_change = df %>% 
+    filter(!is.na(build_change)) %>% 
+    filter(sig_tissue == !!tissue) %>% 
+    pull(gene) %>% unique()
+  
+  build_change_new = df %>% 
+    filter(build_change == "new_contig_added" ) %>% 
+    filter(sig_tissue == !!tissue) %>% 
+    pull(gene) %>% unique()
+  
+  build_change_errors = df %>% 
+    filter(build_change == "hg19_errors_corrected" ) %>%
+    filter(sig_tissue == !!tissue) %>% 
+    pull(gene) %>% unique()
+  
+  build_change_parts = df %>% 
+    filter(build_change == "diff_parts_same_contig" ) %>% 
+    filter(sig_tissue == !!tissue) %>% 
+    pull(gene) %>% unique()
+  
+  # annotation sets
+  known_omim_gene = df %>% 
+    filter(!is.na(known_omim_gene)) %>% 
+    filter(sig_tissue == !!tissue) %>% 
+    pull(gene) %>% unique()
+  
+  discrep_var_enriched = df %>% 
+    filter(!is.na(discrep_var_enriched)) %>% 
+    filter(sig_tissue == !!tissue) %>% 
+    pull(gene) %>% unique()
+  
+  # make plot
+  v = plotVenn(list(`All Sig Genes` = sig_gene_list,
+             `Diff Gene Versions` = diff_gene_versions,
+             `Contig Added` = build_change_new,
+             `Hg19 Errors Corrected` = build_change_errors,
+             `Rearranged Contig` = build_change_parts),
+             setColors = c(tissue_color, "darkorchid",
+                           "orange", "goldenrod", "yellow"),
+             nCycles = 6000,
+             systemShow = T,
+             outFile = paste0(savedir, tissue, "_DEG_reason_vennDiagram.svg"),
+             labelRegions=F,
+             fontScale=2,
+             opacity=0.2,
+             borderWidth=2)
+  
+  # throw out some stats
+  pct_annotations = round(length(sig_gene_list[sig_gene_list %in% diff_gene_versions & sig_gene_list %notin% build_change])/length(sig_gene_list)*100,1)
+  
+  pct_build = round(length(sig_gene_list[sig_gene_list %in% build_change & sig_gene_list %notin% diff_gene_versions])/length(sig_gene_list)*100,1)
+  
+  pct_both = round(length(sig_gene_list[sig_gene_list %in% build_change & sig_gene_list %in% diff_gene_versions])/length(sig_gene_list)*100,1)
+  
+  cat(paste0("\n", pct_annotations, "% of the ", length(sig_gene_list), " genes with apparent differential expression in ", tissue, " are explained by changes to the gene version alone;\n", pct_build, "% are explained by documented changes in the assembly;\n", pct_both, "% are explained by both.\n"))
+}
+```
+
+```{r}
+create_venn_diagram("Blood", "red", blood_sig)
+create_venn_diagram("Fibroblast", "#016895", fib_sig)
+```
+
+
+
+## Upset Plot
+
+```{r}
+library(UpSetR)
+
+myGeneSets <- list(
+  Blood = blood_sig,
+  Fibroblast = fib_sig,
+  # `Diff Gene Verions` = diff_gene_versions,
+  `Overlaps Build Change` = build_change,
+  ` - Added Contig` = build_change_new,
+  ` - Diff Part of Contig` = build_change_parts,
+  ` - Error Correction` = build_change_errors,
+  `OMIM Gene` = known_omim_gene
+  )
+
+presence_matrix = fromList(myGeneSets)
+
+```
+
+```{r}
+ if(!require(devtools)) install.packages("devtools")
+devtools::install_github("krassowski/complex-upset") 
+
+library(ComplexUpset)
+
+upset(presence_matrix,
+      c("Blood","Fibroblast","Diff Gene Verions","OMIM Gene","Overlaps Build Change"),
+      # colnames(presence_matrix),
+      intersections=list(#c("Blood"),
+                         #c("Fibroblast"),
+                         c("Blood","Fibroblast"),
+                         c("Blood","Fibroblast","Diff Gene Verions"),
+                         c("Blood","Fibroblast","Diff Gene Verions","Overlaps Build Change"),
+                         c("Blood","Fibroblast","Diff Gene Verions","Overlaps Build Change","OMIM Gene"),
+                         c("Blood"),
+                         c("Blood","Diff Gene Verions"),
+                         c("Blood","Diff Gene Verions","Overlaps Build Change"),
+                         c("Blood","Diff Gene Verions","Overlaps Build Change","OMIM Gene"),
+                          
+                         c("Fibroblast"),
+                         c("Fibroblast","Diff Gene Verions"),
+                         c("Fibroblast","Diff Gene Verions","Overlaps Build Change"),
+                         c("Fibroblast","Diff Gene Verions","Overlaps Build Change","OMIM Gene")
+                         ),
+      sort_intersections=FALSE)
+
+```

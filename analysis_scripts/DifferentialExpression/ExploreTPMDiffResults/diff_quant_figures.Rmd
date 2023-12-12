@@ -1,0 +1,927 @@
+---
+title: "Differential Expression Tables and Figures"
+author: "P Goddard"
+date: '2022-07-10'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+library(data.table)
+library(ggrepel)
+library(ggplot2)
+library(ggforce)
+library(ggExtra) # ggMarginal
+library(ggpubr) # ggarrange
+# library(Rgb) # read.gtf
+library("biomaRt")
+library(ggrepel)
+library(tidyr)
+library(purrr)
+library(readr)
+library(stringr)
+library(tibble)
+library(forcats)
+library(dplyr)
+
+`%notin%` <- Negate(`%in%`)
+
+```
+
+```{r}
+# gene_names_file = "/oak/stanford/groups/smontgom/shared/UDN/ReferenceFiles/hgnc_ensg_convert_complete.txt"
+# gene_names = fread(gene_names_file) %>% filter(ensg != "" & hgnc != "")
+# 
+# mart <- useEnsembl(biomart = "ensembl",
+#                    dataset = "hsapiens_gene_ensembl", 
+#                    mirror = "useast")
+# mybm=getBM(attributes = c("ensembl_gene_id", "hgnc_symbol", "gene_biotype", "chromosome_name",
+#                           "transcription_start_site", "start_position", "end_position", "strand"),
+#              mart = mart) %>% 
+#   rename(ensg = ensembl_gene_id, hgnc = hgnc_symbol,
+#          chrom = chromosome_name, TSS = transcription_start_site, gene_start = start_position,
+#          gene_end = end_position)
+# 
+# gene_details = gene_names %>% 
+#   left_join(mybm %>% 
+#     filter(ensg != "" & hgnc != "") %>%
+#     arrange(ensg, hgnc) %>%
+#     group_by(ensg) %>%
+#     filter(if (n() > 1) !is.na(gene_biotype) else gene_biotype == gene_biotype) %>% 
+#       summarize(hgnc = paste0(unique(hgnc), collapse=","),
+#                gene_biotype = paste0(unique(gene_biotype), collapse = ","),
+#                chrom = paste0(unique(chrom), collapse=","),
+#                gene_start = paste0(unique(gene_start), collapse=","),
+#                gene_end = paste0(unique(gene_end), collapse=","),
+#                strand = paste0(unique(strand), collapse=","),
+#                n_TSS = n_distinct(TSS)) %>% 
+#     ungroup()
+#   ) %>% 
+#   filter(if (n() > 1) !is.na(gene_biotype) else gene_biotype == gene_biotype)
+#   
+# 
+# table(gene_details$ensg) %>% as.data.frame() %>% arrange(desc(Freq)) %>% head()
+# 
+# write_tsv(gene_details, "/oak/stanford/groups/smontgom/shared/UDN/ReferenceFiles/hgnc_ensg_convert_complete_annotated.txt")
+
+
+```
+
+# Read in Data
+
+## input arugments
+
+```{r}
+build_order = c("hg19", "hg38", "chm13")                    # add to config
+build1_list = c("chm13ensembl","chm13ensembl","hg38")       # add to config
+build2_list = c("hg38","hg19","hg19")                       # add to config
+
+set = 3                                                     # placeholder; actual snake would take build1 and build2 as parameters
+
+tissues = c("Blood", "Fibroblast", "PBMC", "Muscle", "iPS", "iPSC_NPC")  # snakemake param
+# tissue = tissues[3]
+
+inputdir="/oak/stanford/groups/smontgom/shared/UDN/Analysis/ReferenceComparisonPrimary/TPMDifferences/output/03_LIMMA_DiffExp_20221113/"
+savedir="/oak/stanford/groups/smontgom/shared/UDN/Analysis/ReferenceComparisonPrimary/TPMDifferences/output/03_LIMMA_DiffExp_20221113/"
+gene_details_file = "/oak/stanford/groups/smontgom/shared/UDN/ReferenceFiles/hgnc_ensg_convert_complete_annotated.txt"
+
+build1 = build1_list[set]
+build2 = build2_list[set]
+
+
+# this will be provided by snakemake input
+# input_limma = list.files(path = inputdir, pattern = paste0(tissue, str_remove(build1, "ensembl"), "_vs_", str_remove(build2, "ensembl"),".limma_voom_dream.all.txt.gz"))
+
+```
+
+## references
+
+```{r}
+## note: this is just for us - not flexible to other naming conventions
+build1_clean = str_remove(build1, "ensembl")
+build2_clean = str_remove(build2, "ensembl")
+build2_is_newer = match(build2_clean, build_order) > match(build1_clean, build_order)
+
+# colors
+tissues = c("Blood", "PBMC", "Muscle", "Fibroblast", "iPS", "iPSC_NPC") 
+color_list = list(c("#D90025","#d37786","ivory4"),
+                  c("#EF7C18","#ce9666","ivory4"),
+                  c("#AACA2F","#b0bb86","ivory4"), 
+                  c("#27A795","#5fa097","ivory4"), 
+                  c("#0470B5","#508db4","ivory4"), 
+                  c("#BD71DC","#a98ab6","ivory4"))
+
+names(color_list) <- tissues
+color_list_single = lapply(color_list, `[[`, 1) %>% unlist()
+
+# gene names
+gene_details = fread(gene_details_file) %>% 
+  dplyr::select(gene = ensg, gene_name = hgnc, gene_biotype, gene_chrom = chrom)
+
+gene_details %>% filter(gene_biotype == "protein_coding") %>% n_distinct("gene")
+
+```
+
+## load diff express
+
+```{r}
+# load differential expression
+load_limma <- function(tissue, build1, build2, build2_is_newer, inputdir){
+  # build2_is_newer = match(build2, build_order) > match(build1, build_order)
+  
+  file = paste0(inputdir, tissue, ".dedupOptical_minMQ255.diff_expression_", 
+                build1, "_vs_", build2, ".limma_voom_dream.all.txt.gz")
+  print(file)
+  df = fread(file) 
+  df = df %>% 
+    left_join(gene_details, by=c("gene" = "gene")) %>% 
+    mutate(tissue = tissue)
+  
+  if(build2_is_newer){ 
+  print(paste0("Build 2 (", build2, ") is more recent than build 1 (", 
+                 build1, "); logFC will be used as provided"))
+  } else {
+    print(paste0("Build 2 (", build2, ") is older than build 1 (", 
+                 build1, "); flipping logFC..."))
+    df = df %>% mutate(logFC = -logFC)
+  }
+  
+  return(df)
+
+}
+
+# assign(tissue, load_limma(tissue, build1_list[set], build2_list[set], inputdir))
+
+rm(merged_long)
+for( tissue in tissues ){
+  df = load_limma(tissue, build1, build2, build2_is_newer, inputdir)
+  merged_long = rbind(if(exists("merged_long")) merged_long, df)
+  rm(df)
+}
+
+merged_long %>% pull(tissue) %>% unique()
+merged_long %>% filter(gene == "ENSG00000002834") %>% nrow()
+
+
+```
+
+# Integrate TPMs
+
+```{r}
+# need to generate merged file for all secondary tissues
+
+load_expression <- function(tissue, build1, build2){
+
+  build1_clean = str_remove(build1, "ensembl")
+  build2_clean = str_remove(build2, "ensembl")
+
+  expression_dir = paste0("/oak/stanford/groups/smontgom/shared/UDN/Output/")
+  expfile1 = paste0(expression_dir, build1_clean, "/eOutliers/", tissue, ".", build1, ".dedupOptical_minMQ255_rsem.genes.results")
+  expfile2 = paste0(expression_dir, build2_clean, "/eOutliers/", tissue, ".", build2, ".dedupOptical_minMQ255_rsem.genes.results")
+
+  exp1 = fread(expfile1, header=F)
+  exp2 = fread(expfile2, header=F)
+
+  setnames(exp1, new = c("sample", "gene_id", "transcripts", build1_clean))
+  setnames(exp2, new = c("sample", "gene_id", "transcripts", build2_clean))
+
+  exp = exp1 %>%
+    mutate(gene = str_remove(gene_id, "\\..*")) %>%
+    dplyr::select(-transcripts, -gene_id) %>%
+    full_join(exp2 %>%
+            mutate(gene = str_remove(gene_id, "\\..*")) %>%
+            dplyr::select(-transcripts, -gene_id)
+    ) %>%
+    mutate(tissue = tissue) %>%
+    dplyr::select(sample, gene, tissue, everything())
+
+  return(exp)
+
+  rm(exp1, exp2)
+}
+
+head(merged_long)
+
+for( tissue in tissues ){
+  df = load_expression(tissue, build1, build2)
+  head(df)
+  tpm_long = rbind(if(exists("tpm_long")) tpm_long, df)
+  # rm(df)
+}
+
+tpm_long %>% pull(tissue) %>% unique()
+
+gc()
+
+```
+
+<!-- ## Checking direction of effect -->
+
+<!-- ```{r} -->
+<!-- check_exp_top_DEGs <- function(tissue, tpm_data, diffexp_data, build1, build2){ -->
+
+<!--   build1_clean = str_remove(build1, "ensembl") -->
+<!--   build2_clean = str_remove(build2, "ensembl") -->
+
+<!--   top_upreg_genes = diffexp_data %>% -->
+<!--     filter(tissue == !!tissue) %>% -->
+<!--     arrange(desc(logFC )) %>% -->
+<!--     head(n=10) %>% -->
+<!--     pull(gene) -->
+
+<!--   top_upreg_gene_exp = tpm_data %>% -->
+<!--     filter(gene %in% top_upreg_genes) %>% -->
+<!--     gather(key = "build", value = "tpm", -sample, -gene, -tissue) -->
+
+<!--   # print(top_upreg_genes) -->
+
+<!--   # plot top genes -->
+<!--   top_gene_tpm_plot = top_upreg_gene_exp %>% ggplot() + -->
+<!--     geom_histogram(aes(x=tpm, fill = build), alpha = 0.9) + -->
+<!--     facet_wrap(~gene, scales = "free") + -->
+<!--     theme_bw(base_size=14) + -->
+<!--     ggtitle(paste0("Top 10 genes withp positive logFC in ", tissue), -->
+<!--             subtitle = paste0("Build 1: ", build1_clean, "; Build 2: ", build2_clean)) -->
+
+<!--   print(top_gene_tpm_plot) -->
+<!--   ggsave(top_gene_tpm_plot, -->
+<!--          filename = paste0(savedir, tissue, ".", build1, "_vs_", build2, -->
+<!--                           ".dedupOptical_minMQ255_rsem.genes.top10DEG_tpm_distributions.png"), -->
+<!--         width = 7, height = 5, units = "in") -->
+
+<!--   # top_upreg_gene_exp %>% -->
+<!--   #   group_by(gene, build) %>% -->
+<!--   #   summarize(median = median(tpm, na.rm=T)) %>% -->
+<!--   #   spread(key = build, value = median) -->
+
+
+<!-- } -->
+
+
+<!-- for (tissue in tissues){ -->
+<!--   check_exp_top_DEGs(tissue, tpm_long, merged_long, build1, build2) -->
+<!-- } -->
+
+
+
+<!-- ``` -->
+
+## Annotate diff exp genes with median expression
+
+```{r}
+head(tpm_long)
+
+merged_long = merged_long %>% left_join(
+  tpm_long %>%
+    rename(build1 = !!build1_clean) %>%
+    rename(build2 = !!build2_clean) %>%
+    group_by(gene, tissue) %>%
+    summarize(build1_tpm_mean = mean(build1, na.rm=T),
+              build1_tpm_sd = mean(build1, na.rm=T),
+              build2_tpm_mean = mean(build2, na.rm=T),
+              build2_tpm_sd = sd(build2, na.rm=T))
+)
+
+```
+
+# LogFC Threshold Elbow Plot
+
+```{r fig.height=6.5, fig.width=8}
+# alpha = 0.05
+
+for (alpha in c(0.05, 0.01)) {
+    
+    logFC_thresholds = merged_long %>% 
+      dplyr::select(gene, tissue, AveExpr, logFC, adj.P.Val) %>% 
+      group_by(tissue) %>% 
+      summarize(`0.1` = sum(adj.P.Val <= !!alpha & abs(logFC) >= 0.1),
+                `0.25` = sum(adj.P.Val <= !!alpha & abs(logFC) >= 0.25),
+                `0.5` = sum(adj.P.Val <= !!alpha & abs(logFC) >= 0.5),
+                `0.75` = sum(adj.P.Val <= !!alpha & abs(logFC) >= 0.75),
+                `1.0` = sum(adj.P.Val <= !!alpha & abs(logFC) >= 1.0),
+                `1.25` = sum(adj.P.Val <= !!alpha & abs(logFC) >= 1.25),
+                `1.5` = sum(adj.P.Val <= !!alpha & abs(logFC) >= 1.5),
+                `1.75` = sum(adj.P.Val <= !!alpha & abs(logFC) >= 1.75),
+                `2` = sum(adj.P.Val <= !!alpha & abs(logFC) >= 2.0),
+                `2.25` = sum(adj.P.Val <= !!alpha & abs(logFC) >= 2.25),
+                `2.5` = sum(adj.P.Val <= !!alpha & abs(logFC) >= 2.5),
+                `2.75` = sum(adj.P.Val <= !!alpha & abs(logFC) >= 2.75),
+                `3` = sum(adj.P.Val <= !!alpha & abs(logFC) >= 3)) %>% 
+      gather(key = "logFC_threshold", value = "n_sig_genes", -tissue) %>% 
+      mutate(p_adj_threshold = !!alpha) %>% 
+      mutate(logFC_threshold = as.numeric(logFC_threshold)) 
+      # spread(key = tissue, value = n_sig_genes)
+      
+    p = logFC_thresholds %>% 
+      ggplot(aes(x = logFC_threshold, y = n_sig_genes, color = tissue)) + 
+      geom_point(size = 3) + 
+      geom_line() + 
+      scale_color_manual(values = color_list_single) +
+      geom_text_repel(aes(label = n_sig_genes), nudge_x = 0.25, nudge_y = 0.25) +
+      facet_wrap(~ tissue) +
+      ggtitle(paste0("# Genes with sig different expression (P.adj <= ", alpha, ")"),
+              subtitle = paste0(build1, " vs ", build2)) +
+      theme_bw(base_size = 14) +
+      theme(legend.position = "none")
+    
+    print(p)
+    
+    ggsave(plot = p, height = 5, width=8, units = "in", 
+           filename = paste0(savedir, "all_tissues.", build1, "_vs_", build2,
+                            ".dedupOptical_minMQ255_rsem.genes.logFC_elbowplot_alpha0", alpha*10, ".png"))
+    
+    rm(p)
+}
+  
+```
+
+# Decide thresholds
+
+```{r}
+alpha = 0.05
+logFC_loose = 1
+logFC_strict = 2
+
+# n_tested = merged_long %>% pull(gene) %>% unique() %>% length()
+# bf_alpha = 0.05/n_tested
+bf = merged_long %>% group_by(tissue) %>% summarize(n_tested = n_distinct(gene)) %>% mutate(alpha = 0.05/n_tested)
+
+cat("\nBonferroni Corrected Sig Counts\n")
+merged_long = merged_long %>% mutate(is_sig = ifelse(P.Value <= filter(bf, tissue == tissue)$alpha & abs(logFC) >= logFC_loose, 1, 0))
+table(merged_long$tissue, merged_long$is_sig)
+
+cat("\n\nBenjamini Hochberg Corrected Sig Counts (LIMMA Default)\n")
+merged_long = merged_long %>% mutate(is_sig = ifelse(adj.P.Val <= alpha & abs(logFC) >= logFC_loose, 1, 0))
+table(merged_long$tissue, merged_long$is_sig)
+
+
+head(merged_long)
+
+```
+
+# Save data
+
+```{r}
+write_tsv(merged_long, paste0(savedir, "all_tissues.", build1, "_vs_", build2,
+                            ".dedupOptical_minMQ255_rsem.genes.merged_long.txt"))
+```
+
+# Tables
+
+## Summary
+
+```{r}
+# get genes dropped from analysis
+get_dropped_gene_count <- function(test_tissue, union_tissues=NA, build1, build2){
+  path="/oak/stanford/groups/smontgom/pgoddard/UDN/UDNShared/Analysis/ReferenceComparisonPrimary/TPMDifferences/output/02_intermediateOutputs/"
+  if (test_tissue == "Union" && !is.na(union_tissues)){
+    genes = c()
+    for(t in union_tissues){
+      file = paste0(path, t, ".", build1, "_vs_", build2,  
+                    ".dedupOptical_minMQ255_rsem.genes.not_enough_exp.0counts_0.1cpm_30pct_samples.txt")
+      tmp = fread(file) %>% pull(gene) %>% unique()
+      genes = c(genes, tmp) %>% unique()
+      rm(tmp)
+    }
+    return(length(genes))
+  } else {
+    file = paste0(path, test_tissue, ".", build1, "_vs_", build2,  
+                  ".dedupOptical_minMQ255_rsem.genes.not_enough_exp.0counts_0.1cpm_30pct_samples.txt")
+    n_genes = fread(file) %>% dplyr::select(gene) %>% n_distinct()
+    return(n_genes)
+  }
+}
+
+get_dropped_gene_count_V <- Vectorize(get_dropped_gene_count)
+
+merged_long %>% 
+  group_by(tissue) %>% 
+  summarize(n_tested = n_distinct(gene, na.rm=T),
+            n_tested_coding = n_distinct(gene[gene_biotype == "protein_coding"], na.rm=T),
+            n_sig = n_distinct(gene[adj.P.Val <= alpha & 
+                                      abs(logFC) >= logFC_loose], na.rm=T),
+            n_sig_coding = n_distinct(gene[adj.P.Val <= alpha & 
+                                             abs(logFC) >= logFC_loose &
+                                   gene_biotype == "protein_coding"], na.rm=T),
+            mean_abs_logFC = mean(abs(logFC[adj.P.Val <= alpha & 
+                                              abs(logFC) >= logFC_loose]), na.rm=T),
+            sd_abs_logFC = sd(abs(logFC[adj.P.Val <= alpha & 
+                                          abs(logFC) >= logFC_loose]), na.rm=T)
+            ) %>% 
+  rbind(merged_long %>% 
+          mutate(tissue = "Union") %>% 
+          group_by(tissue) %>% 
+          summarize(n_tested = n_distinct(gene, na.rm=T),
+            n_tested_coding = n_distinct(gene[gene_biotype == "protein_coding"], na.rm=T),
+            n_sig = n_distinct(gene[adj.P.Val <= alpha & 
+                                      abs(logFC) >= logFC_loose], na.rm=T),
+            n_sig_coding = n_distinct(gene[adj.P.Val <= alpha & 
+                                             abs(logFC) >= logFC_loose &
+                                   gene_biotype == "protein_coding"], na.rm=T),
+            mean_abs_logFC = mean(abs(logFC[adj.P.Val <= alpha & 
+                                              abs(logFC) >= logFC_loose]), na.rm=T),
+            sd_abs_logFC = sd(abs(logFC[adj.P.Val <= alpha & 
+                                          abs(logFC) >= logFC_loose]), na.rm=T)
+            )) %>% 
+  mutate(mean_sd_logFC = paste0(signif(mean_abs_logFC, 3), " \u00B1 ", signif(sd_abs_logFC, 3))) %>% 
+  mutate(n_dropped = get_dropped_gene_count_V(test_tissue = tissue, union_tissues = !!tissues, build1=!!build1, build2=!!build2)) %>% 
+  dplyr::select(tissue, n_dropped, n_tested, n_tested_coding, n_sig,n_sig_coding, mean_sd_logFC)
+
+```
+
+## By chromosome
+
+```{r}
+
+merged_long %>% 
+  group_by(tissue, gene_chrom) %>%
+  summarize(tested = n_distinct(gene),
+            sig = n_distinct(gene[adj.P.Val <= alpha & abs(logFC) >= logFC_loose], na.rm=T)) %>% 
+  rbind(merged_long %>% 
+          mutate(tissue = "Union") %>% 
+          group_by(tissue, gene_chrom) %>% 
+          summarize(tested = n_distinct(gene),
+                    sig = n_distinct(gene[adj.P.Val <= alpha & abs(logFC) >= logFC_loose], na.rm=T))) %>% 
+  mutate(prop_tested = signif(sig/tested, 2)) %>% 
+  dplyr::select(chromosome = gene_chrom, tissue, prop_tested) %>% 
+  spread(key = "tissue", value = "prop_tested") %>% 
+  print.data.frame()
+
+```
+
+# Bar Plots - Total Sig
+
+```{r}
+# load data
+file1 = paste0(savedir, "all_tissues.", build1, "_vs_", build2,
+               ".dedupOptical_minMQ255_rsem.genes.merged_long.txt")
+file2 = paste0(savedir, "all_tissues.", build1_list[3], "_vs_", build2_list[3],
+               ".dedupOptical_minMQ255_rsem.genes.merged_long.txt")
+
+comp1 = fread(file1) %>% 
+  dplyr::select(gene, tissue, logFC, P.Value, adj.P.Val, is_sig) %>% 
+  mutate(comparison = paste0(str_remove(build2, "ensembl"), ":", str_remove(build1, "ensembl")))
+
+comp2 = fread(file2) %>% 
+  dplyr::select(gene, tissue, logFC, P.Value, adj.P.Val, is_sig) %>% 
+  mutate(comparison = paste0(str_remove(build2_list[3], "ensembl"), ":", str_remove(build1_list[3], "ensembl")))
+
+multi_comparison = rbind(comp1, comp2)
+
+
+```
+
+```{r fig.height=5, fig.width=14}
+n_sig_to_plot = multi_comparison %>% 
+  group_by(tissue, comparison) %>% 
+  summarize(n_sig = n_distinct(gene[is_sig==1], na.rm=T)) %>% 
+  rbind( multi_comparison%>% 
+           mutate(tissue = "Union") %>% 
+           group_by(tissue, comparison) %>% 
+           summarize(n_sig = n_distinct(gene[is_sig==1], na.rm=T))
+  )
+
+n_sig_to_plot
+
+
+ggplot(n_sig_to_plot, aes(x = tissue, y = n_sig, fill = tissue)) + 
+  geom_col() + 
+  geom_text(aes(label = n_sig), vjust = -0.5, size = 8) +
+  scale_y_continuous(name = "# Significant Diff Quant Genes",
+                     expand = expansion(mult = c(0, 0.15))) +
+  scale_fill_manual(values = c(color_list_single, "grey47")) +
+  facet_wrap( ~ comparison, scales = "free") +
+  theme_bw(base_size = 20) +
+  theme(legend.position = "none",
+        panel.spacing = unit(9, "lines"),
+        panel.grid.minor = element_blank(),
+        axis.text.x = element_text(angle = 45, vjust=1, hjust=1),
+        axis.title.x = element_blank())
+
+```
+
+# LogFC Distribution
+
+## Density
+
+```{r}
+# load data
+file1 = paste0(savedir, "all_tissues.", build1, "_vs_", build2,
+               ".dedupOptical_minMQ255_rsem.genes.merged_long.txt")
+file2 = paste0(savedir, "all_tissues.", build1_list[3], "_vs_", build2_list[3],
+               ".dedupOptical_minMQ255_rsem.genes.merged_long.txt")
+
+comp1 = fread(file1) %>% 
+  dplyr::select(gene, tissue, logFC, P.Value, adj.P.Val, is_sig) %>% 
+  mutate(comparison = paste0(str_remove(build2, "ensembl"), ":", str_remove(build1, "ensembl")))
+
+comp2 = fread(file2) %>% 
+  dplyr::select(gene, tissue, logFC, P.Value, adj.P.Val, is_sig) %>% 
+  mutate(comparison = paste0(str_remove(build2_list[3], "ensembl"), ":", str_remove(build1_list[3], "ensembl")))
+
+multi_comparison = rbind(comp1, comp2)
+
+
+```
+
+```{r fig.height=5, fig.width=14}
+# all tissues, split by comparison
+min_logfc = min(multi_comparison$logFC, na.rm=T)
+max_logfc = max(multi_comparison$logFC, na.rm=T)
+
+multi_comparison %>% 
+  filter(adj.P.Val <= 0.05 & abs(logFC) >= 1) %>% 
+  ggplot(aes(x = logFC, color = tissue)) + 
+  geom_line(stat="density", size = 1.5, alpha = 0.5) +
+  scale_x_continuous(limits = c(min_logfc, max_logfc)) +
+  scale_color_manual(values = color_list_single) +
+  facet_wrap( ~ comparison, scales = "free") +
+  theme_bw(base_size = 20) +
+  theme(legend.position = c(0.48,0.5),
+        legend.title = element_blank(),
+        panel.spacing = unit(9, "lines"),
+        panel.grid.minor = element_blank())
+
+# faceted by tissue
+multi_comparison %>% 
+  filter(adj.P.Val <= 0.05 & abs(logFC) >= 1) %>% 
+  ggplot(aes(x = logFC, fill = comparison)) + 
+  geom_density(alpha = 0.4) +
+  # scale_x_continuous(trans = "sqrt") +
+  scale_fill_manual(values = c("#d07c10", "#006B2F")) +
+  theme_bw() + 
+  facet_wrap( ~ tissue)
+
+# ignoring tissue
+multi_comparison %>% 
+  filter(adj.P.Val <= 0.05 & abs(logFC) >= 1) %>% 
+  ggplot(aes(x = logFC, fill = comparison)) + 
+  geom_density(alpha = 0.4) +
+  # scale_x_continuous(trans = "sqrt") +
+  scale_fill_manual(values = c("#d07c10", "#006B2F")) +
+  theme_bw(base_size = 20) +
+  theme(legend.position = "bottom")
+
+
+```
+## Ridges
+
+```{r fig.height=5, fig.width=14}
+library(ggridges)
+
+multi_comparison_to_ridge = multi_comparison %>% filter(adj.P.Val <= 0.05 & abs(logFC) >= 1)
+
+multi_comparison_to_ridge %>% 
+  ggplot(aes(x = logFC, y = tissue, color = tissue, fill = tissue)) + 
+    geom_density_ridges(data = subset(multi_comparison_to_ridge, logFC<=-1),
+                        aes(height = ..density..), stat = "density", trim = TRUE,
+                        size = 1.5, alpha = 0.5, size = 10, na.rm = T) +
+    geom_density_ridges(data = subset(multi_comparison_to_ridge, logFC>=1),
+                        aes(height = ..density..), stat = "density", trim = TRUE,
+                        size = 1.5, alpha = 0.5, size = 10) +
+    geom_vline(aes(xintercept = -1), linetype = "dashed") + 
+    geom_vline(aes(xintercept = 1), linetype = "dashed") + 
+    scale_x_continuous(limits = c(min_logfc, max_logfc)) +
+    scale_fill_manual(values = color_list_single) +
+    scale_color_manual(values = color_list_single) +
+    facet_wrap( ~ comparison, scales = "free") +
+    theme_bw(base_size = 30) +
+    theme(legend.position = "none", #c(0.47,1),
+          legend.title = element_blank(),
+          legend.background = element_rect(fill = "transparent"),
+          legend.spacing = unit(1.5, "lines"),
+          panel.spacing = unit(9, "lines"),
+          panel.grid.minor = element_blank())
+
+```
+
+# Volcano Plots
+
+## per-tissue
+
+```{r fig.height=4, fig.width=5.5}
+# volcano plot (original vibe)
+
+volcano_plot <- function(df, 
+                         tissue=NA, 
+                         build1 = build1_clean, 
+                         build2 = build2_clean, 
+                         logFC_loose = 1, 
+                         logFC_strict = 2, 
+                         alpha = 0.05, 
+                         colors = c("#dfad6e","#e98300","ivory4")) {
+  if (!is.na(tissue)){
+    df = df %>% filter(tissue == !!tissue)
+  }
+  
+  to_plot = df %>% 
+    # drop MT genes
+    # filter(!grepl("^MT", gene_name)) %>% 
+    # add plot features
+    mutate(logpval = ifelse(P.Value == 0, 300, -log10(P.Value))) %>%
+    mutate(sig_pval = adj.P.Val <= !!alpha & abs(logFC) >= !!logFC_loose) %>% 
+    mutate(status = ifelse(adj.P.Val <= !!alpha & 
+                           abs(logFC) >= !!logFC_strict, paste0("abs(logFC)>",!!logFC_strict),
+                                  ifelse(adj.P.Val <= !!alpha & abs(logFC) >= !!logFC_loose, 
+                                         paste0("abs(logFC)>",!!logFC_loose), "Not significant"))) %>% 
+    mutate(status = factor(status, ordered = T,
+                           levels = c(paste0("abs(logFC)>",!!logFC_strict),
+                                      paste0("abs(logFC)>",!!logFC_loose),
+                                      "Not significant")))
+  
+
+    # volcano plot
+   p = ggplot(to_plot) +
+      geom_point(aes(x = logFC, y = logpval, alpha = sig_pval, color = status),
+                 size = 2)
+   
+   p = p + theme_bw(base_size=14)
+   
+   p = p + ylab("-log10(adj pvalue)")
+   
+   if (build2_is_newer){
+     p = p + xlab(paste0("log2FC = log2(", build2, "/", build1, ")" ))
+   } else {
+     p = p + xlab(paste0("log2FC = log2(", build1, "/", build2, ")" ))
+   }
+   
+   p = p + scale_alpha_manual(values = c(0.3, 0.7)) 
+   p = p + scale_color_manual(values = colors)
+   p = p + theme(panel.grid.minor = element_blank())
+   p = p + ggtitle(paste0("Differential Gene Expression for ", tissue), subtitle = paste0(build1, " vs ", build2))
+  
+  print(p)
+  
+  ggsave(plot = p, filename = paste0(savedir, tissue, ".", build1, "_vs_", build2, 
+                                     "dedupOptical_minMQ255_rsem.genes.volcano_alpha0", alpha*10, ".png"), 
+         height = 7, width = 9)
+  
+  # rm(p)
+}
+
+
+for (tissue in tissues){
+  print(tissue)
+  volcano_plot(df = merged_long, tissue = tissue, colors = unlist(unname(color_list[tissue])))
+}
+
+```
+
+## joint volcano
+
+```{r fig.height=6, fig.width=8}
+to_explode =  merged_long %>% 
+  mutate(sig_pval = adj.P.Val <= !!alpha & abs(logFC) >= !!logFC_loose) %>% 
+  # filter(sig_pval) %>% 
+  group_by(gene, gene_name) %>% 
+  filter(if (any(sig_pval, na.rm=T)) P.Value == min(P.Value[sig_pval], na.rm=T) else P.Value == min(P.Value, na.rm=T)) %>% 
+  ungroup() %>% 
+  # drop MT genes
+  # filter(!grepl("^MT", gene_name)) %>% 
+  # add plot features
+  mutate(logpval = ifelse(P.Value == 0, 300, -log10(P.Value))) %>%
+  mutate(status = ifelse(sig_pval, tissue, "Not Significant")) %>% 
+  mutate(status = factor(status, levels = c(tissues, "Not Significant"), ordered=T)) %>% 
+  mutate(Biotype = ifelse(gene_biotype == "protein_coding", "Protein Coding", "Non-coding"))
+
+n_union = to_explode %>% filter(sig_pval) %>% pull(gene) %>% unique() %>% length()
+
+p = ggplot(to_explode) +
+      geom_point(aes(x = logFC, y = logpval, alpha = sig_pval, color = status),
+                 size = 2)
+   
+p = p + theme_bw(base_size=16)
+p = p + ylab("-log10(adj pvalue)")
+
+if (build2_is_newer){
+   p = p + xlab(paste0("log2FC = log2(", build2, "/", build1, ")" ))
+} else {
+   p = p + xlab(paste0("log2FC = log2(", build1, "/", build2, ")" ))
+}
+   
+p = p + scale_alpha_manual(values = c(0.3, 0.7)) 
+p = p + scale_color_manual(values = c(unname(color_list_single), "ivory4"))
+p = p + theme(panel.grid.minor = element_blank())
+p = p + ggtitle(paste0("Most significant diff quantification across all tisses"), 
+                subtitle = paste0(build1, " vs ", build2))
+  
+print(p)
+  
+ggsave(plot = p, filename = paste0(savedir, "all_tissues.", build1, "_vs_", build2,
+                                     "dedupOptical_minMQ255_rsem.genes.volcano_alpha0", alpha*10, ".png"), 
+         height = 7, width = 9)
+
+
+```
+
+# Tissue Consistency
+
+## Histograms
+
+### n DEGs vs n 
+
+```{r}
+hlight_color = "red"
+
+# number of genes diff expressed in n tissues
+hist_deg_by_ntiss = merged_long %>% 
+  filter( adj.P.Val <= alpha & abs(logFC) >= logFC_loose ) %>% 
+  group_by(gene, gene_name) %>% 
+  summarize(n_tissues = n_distinct(tissue)) %>% 
+  ungroup() %>% 
+  
+  ggplot(aes(x=n_tissues)) + 
+    stat_bin(aes(fill=factor(ifelse(n_tissues==1,"Highlighted","Normal"))), 
+             binwidth=1) +
+    stat_bin(binwidth=1, geom="text", aes(label=..count..), vjust=-1, cex = 8) +
+    scale_x_continuous(breaks = c(1,2,3,4,5,6)) +
+    scale_fill_manual(name = "area", values=c(hlight_color,"grey50"), guide="none") +
+    theme_bw(base_size = 14) +
+    theme(panel.grid.minor = element_blank()) +
+    xlab("N tissues detected") +
+    ylab("N diff quant genes")
+
+# This object will expose the ingredients for the plot and get the tallest bin height:
+ymax = max(ggplot_build(hist_deg_by_ntiss)[["data"]][[1]][["count"]])*1.2
+hist_deg_by_ntiss = hist_deg_by_ntiss + ylim(0,ymax)
+hist_deg_by_ntiss
+```
+
+### Single-tissue DEGs
+
+```{r}
+# investigate the single-tissue DEGs
+single_tissue = merged_long %>% 
+  filter( adj.P.Val <= alpha & abs(logFC) >= logFC_loose ) %>% 
+  group_by(gene, gene_name) %>% 
+  summarize(n_tissues = n(),
+            sig_tissues = paste0(unique(tissue), collapse = ",")) %>% 
+  filter(n_tissues == 1)
+
+single_tissue_degs = single_tissue %>% pull(gene)
+
+# where the single-tissue DEGs tested in other tissues?
+single_tissue_tested = merged_long %>% 
+  filter(gene %in% single_tissue_degs) %>% 
+  dplyr::select(gene, gene_name, tissue)  %>% 
+  group_by(gene, gene_name) %>% 
+  summarize(n_tested_tissues = n_distinct(tissue),
+            tested_tissues = paste0(unique(tissue), collapse = ",")) %>% 
+  ungroup()
+
+singleDEGS_testedTiss_hist = single_tissue_tested %>% 
+  
+  ggplot(aes(x=n_tested_tissues)) + 
+    stat_bin(binwidth=1, fill = hlight_color, color = "white") +  
+    stat_bin(binwidth=1, geom="text", aes(label=..count..), vjust=-1, cex = 8) +
+    scale_x_continuous(breaks = c(1,2,3,4,5,6)) +
+    scale_fill_manual(name = "area", values=c("red","grey50")) +
+    xlab("N tissues tested") +
+    ylab("N single-tissue DEGs") +
+    theme_bw(base_size = 14) +
+    theme(panel.grid.minor = element_blank())
+
+ymax = max(ggplot_build(singleDEGS_testedTiss_hist)[["data"]][[1]][["count"]])*1.2
+singleDEGS_testedTiss_hist = singleDEGS_testedTiss_hist + ylim(0,ymax)
+singleDEGS_testedTiss_hist
+
+rm(ymax, hlight_color, single_tissue_degs)
+
+```
+
+### Exp of single-tisse genes
+```{r fig.height=6, fig.width=9}
+single_tissue_tpm = left_join(single_tissue_tested, tpm_long) %>% 
+  left_join(single_tissue) %>% 
+  filter(n_tested_tissues > 1) %>% 
+  separate_rows(tested_tissues, sep = ",") %>% 
+  filter(tissue == tested_tissues) %>% 
+  mutate(is_sig_tissue = tissue == sig_tissues) %>% 
+  gather(key = "build", value = "tpm", -gene, -gene_name, -n_tested_tissues, -tested_tissues, -n_tissues, 
+         -sig_tissues, -tissue, -is_sig_tissue, -sample)
+
+subset = single_tissue_tpm %>% pull(gene) %>% unique() %>% head()
+
+single_tissue_tpm %>% 
+  filter(gene %in% subset) %>% 
+  # filter(gene == "ENSG00000018607") %>%
+  ggplot(aes(y = tpm, x=tissue, fill = tissue, alpha = is_sig_tissue, linetype = build)) +
+  geom_violin() +
+  scale_y_continuous(trans = "log10") +
+  scale_linetype_manual(values = c("dotted", "solid")) +
+  scale_alpha_manual(values = c(0.1, 1), guide = "none") +
+  scale_fill_manual(values = color_list_single) +
+  theme_bw(base_size = 14) +
+  theme(axis.text.x = element_text(angle = 45, vjust=1, hjust=1)) +
+  facet_wrap( ~ gene_name, scales = "free") + 
+  ggtitle("TPM distrbutions of six single-tissue build-dependent genes\nacross all tested tissues")
+
+```
+
+## Upset: Differentially expressed
+
+```{r fig.height=5, fig.width=10}
+library(UpSetR)
+
+# movies <- read.csv( system.file("extdata", "movies.csv", package = "UpSetR"), header=T, sep=";" )
+# head(movies)
+
+to_upset = merged_long %>% 
+  mutate(is_sig = ifelse( adj.P.Val <= alpha & abs(logFC) >= logFC_loose, 1, 0 )) %>% 
+  dplyr::select(gene, gene_name, tissue, is_sig) %>% 
+  distinct() %>% 
+  spread(key = tissue, value = is_sig, fill = 0)
+
+to_upset
+
+n_deg_tissue = to_upset %>% 
+  dplyr::select(-starts_with("gene")) %>% 
+  colSums() %>% 
+  as.data.frame() %>% 
+  setnames(., new="Freq") %>% 
+  arrange(desc(Freq)) 
+
+max_deg_tissue = n_deg_tissue %>% pull(Freq) %>% max()
+
+upset_order = rownames(n_deg_tissue)
+# color_list_single = lapply(color_list, `[[`, 2) %>% unlist()
+color_list_single = color_list_single[match(upset_order, names(color_list_single))]
+
+uplot = upset(to_upset, nsets = length(tissues), sets.bar.color = color_list_single, sets.x.label = "Total diff quant genes", set_size.show	= T, set_size.scale_max	= 1.15*max_deg_tissue, text.scale = 1.25, order.by = "freq")
+
+uplot2 = upset(to_upset, nsets = length(tissues), sets.bar.color = color_list_single, sets.x.label = "Total diff quant genes", set_size.show	= T, set_size.scale_max	= 1.15*max_deg_tissue, text.scale = 1.25, order.by = "degree", nintersects = NA)
+
+uplot
+uplot2
+
+png(file=paste0(savedir, "all_tissues.", build1, "_vs_", build2, 
+                ".dedupOptical_minMQ255_rsem.genes", 
+                ".upset_alpha0", alpha*10, "_byfreq.png"),
+    width = 10, height = 5, units = "in", res = 200)
+uplot
+dev.off()
+
+png(file=paste0(savedir, "all_tissues.", build1, "_vs_", build2, 
+                ".dedupOptical_minMQ255_rsem.genes", 
+                ".upset_alpha0", alpha*10, "_bydegree.png"),
+    width = 10, height = 5, units = "in", res = 200)
+uplot2
+dev.off()
+
+```
+
+## Tested genes
+
+```{r fig.height=5, fig.width=10}
+
+to_upset = merged_long %>% 
+  mutate(is_tested = 1) %>% 
+  dplyr::select(gene, gene_name, tissue, is_tested) %>% 
+  distinct() %>% 
+  spread(key = tissue, value = is_tested, fill = 0)
+
+to_upset
+
+n_tissue = to_upset %>% 
+  dplyr::select(-starts_with("gene")) %>% 
+  colSums() %>% 
+  as.data.frame() %>% 
+  setnames(., new="Freq") %>% 
+  arrange(desc(Freq)) 
+
+max_tissue = n_tissue %>% pull(Freq) %>% max()
+
+upset_order = rownames(n_tissue)
+# color_list_single = lapply(color_list, `[[`, 2) %>% unlist()
+color_list_single = color_list_single[match(upset_order, names(color_list_single))]
+
+uplot = upset(to_upset, nsets = length(tissues), 
+              sets.bar.color = color_list_single, 
+              sets.x.label = "Total tested genes", 
+              set_size.show	= T, 
+              set_size.scale_max	= 1.15*max_tissue, text.scale = 1.25, order.by = "freq")
+
+uplot2 = upset(to_upset, nsets = length(tissues), sets.bar.color = color_list_single, sets.x.label = "Total tested genes", set_size.show	= T, set_size.scale_max	= 1.15*max_tissue, text.scale = 1.25, order.by = "degree", nintersects = NA)
+
+uplot
+uplot2
+
+png(file=paste0(savedir, "all_tissues.", build1, "_vs_", build2, 
+                ".dedupOptical_minMQ255_rsem.genes", 
+                ".upset_alltested_byfreq.png"),
+    width = 10, height = 5, units = "in", res = 200)
+uplot
+dev.off()
+
+png(file=paste0(savedir, "all_tissues.", build1, "_vs_", build2, 
+                ".dedupOptical_minMQ255_rsem.genes", 
+                ".upset_alltested_bydegree.png"),
+    width = 10, height = 5, units = "in", res = 200)
+uplot2
+dev.off()
+
+```
+
+```{r}
+```

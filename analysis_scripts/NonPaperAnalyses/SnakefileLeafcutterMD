@@ -1,0 +1,87 @@
+import os,glob,re
+import pandas as pd
+
+build = config["build"]
+TISSUES=["Blood","Fibroblast"]
+
+#metadata=config["sample_file"]
+sample_table = pd.read_csv(config["sample_file"], sep='\t').set_index("SAMPLE", drop=False)
+sample_table.index.name = None
+sample_table_filt=sample_table[sample_table['TISSUE'].isin(TISSUES)]
+SAMPLES=sample_table_filt['SAMPLE'].to_list()
+#GENE_OR_ISOFORMS=["genes","isoforms"]
+FEATURES=["isoforms","genes","exons"]
+FEATURES=["genes"]
+print(SAMPLES)
+print(TISSUES)
+
+def get_levels(wildcards):
+        this_feat=wildcards.feature
+        if(this_feat=="isoforms"):
+                return "enst"
+        if(this_feat=="genes"):
+                return "ensg"
+
+rule all:
+	input:
+		expand(config["leafcutter_dir"]+"/Constraint/genic_{sample}_{feature}.txt",sample=SAMPLES,feature=FEATURES)
+		expand(config["leafcutter_dir"]+"/udn_{tissue}_z_{feature}_collapse.txt",tissue=TISSUES,feature=FEATURES)
+
+##everything below is for analysis for quinlan lab
+rule constraint_anno:
+	input:
+		bedtools=config["bedtools"],
+		sample=config["leafcutter_dir"]+"/SplitByInd/collapsed_{sample}_{feature}.bed",
+		#config["leafcutter_dir"]+"/SplitByInd/{tissue}_RD048.txt",
+		constraint=config["reference_files_dir"]+"/genic_splicing_constraint_wchr.txt.gz"
+		
+	output:
+		outfile=config["leafcutter_dir"]+"/Constraint/genic_{sample}_{feature}.txt"
+	shell:
+		"""
+		{input.bedtools} sort -i {input.sample} > {input.sample}.sorted.bed
+		{input.bedtools} intersect -a {input.sample}.sorted.bed -b {input.constraint} -loj > {output}
+		"""
+#this checks to see if the annotated file has the same gene next to it
+#if it has the same gene next to it, then print ensg/enst/score
+#otherwise, print NA in these places
+rule constraint_red:
+	input:
+		config["leafcutter_dir"]+"/Constraint/genic_{sample}_{feature}.txt"
+	output:
+		config["leafcutter_dir"]+"/Constraint/genicreduced_{sample}_{feature}.txt"
+	shell:
+		"""
+		cat {input} | \
+			awk -F"\t" '{{split($15,a,"\\."); 
+			if(a[1]==""){{gene="NA"}}else{{gene=a[1]}}; 
+			if(gene==$8){{
+				print $1"\t"$2"\t"$3"\t"$4"\t"$5"\t"$6"\t"$7"\t"$8"\t"$9"\t"$15"\t"$16"\t"$17"\t"$18
+			}}else{{
+				print $1"\t"$2"\t"$3"\t"$4"\t"$5"\t"$6"\t"$7"\t"$8"\t"$9"\tNA\tNA\tNA"
+			}}}}' > {output}
+		"""
+rule reduce_anno:
+	input:
+		config["leafcutter_dir"]+"/udn_{tissue}_z_wgenes.txt"
+	output:
+		config["leafcutter_dir"]+"/udn_{tissue}_z_wgenes_red.txt"
+	shell:
+		"""
+		awk -F"\t" '{{print $1"\t"$2"\t"$3"\t"$4"\t"$5"\t"$6"\t"$7"\t"$12"\t"$13}}' {input} | uniq > {output}
+		"""
+rule collapse:
+	input:
+		file=config["leafcutter_dir"]+"/udn_{tissue}_z_wgenes_red.txt",
+		script=config["scripts_dir"]+"/splicing_analysis/outlier/collapsed.R",
+		R=config["Rscript"]
+	params:
+		collapse_level=get_levels
+	output:
+		config["leafcutter_dir"]+"/udn_{tissue}_z_{feature}_collapse.txt"
+	shell:
+		"""
+		{input.R} {input.script} --infile {input.file} --pull_type {params} --outfile {output}
+		"""
+
+

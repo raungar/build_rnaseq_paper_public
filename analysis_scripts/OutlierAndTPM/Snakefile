@@ -1,0 +1,192 @@
+import os, glob, yaml
+import pandas as pd
+
+# samples and meta data
+sample_table = pd.read_csv(config["sample_file"], sep='\t').set_index("SAMPLE", drop=False)
+sample_table.index.name = None
+SAMPLES = list(sample_table.index.values)
+remove_samples=[""] 
+SAMPLES=list(set(SAMPLES)-set(remove_samples))
+TISSUES=set(list(sample_table.loc[:,"TISSUE"]))
+print(TISSUES)
+TISSUES=["Blood","Fibroblast"] #,"Muscle"]
+GENE_OR_ISOFORMS=["genes","isoforms"]
+GENE_OR_ISOFORMS=["genes"]
+TPM_OR_Z=["tpm","zscores"]
+#TPM_OR_Z=["zscores"]
+minMapQ = config["min_mapping_quality"]
+# How to handle duplicates
+remove_all_duplicates = config["remove_all_duplicates"]
+remove_optical_duplicates = config["remove_optical_duplicates"]
+mark_duplicates = config["mark_duplicates"]
+
+if remove_all_duplicates:
+    dupStatus = "dedupAll"
+    print("Removing all duplicate reads (including PCR and optical duplicates)")
+elif remove_optical_duplicates:
+    dupStatus = "dedupOptical"
+    print("Removing optical duplicates only")
+else:
+    dupStatus = "dedupNone"
+    print("Will not remove duplicates")
+
+
+rule all:
+	input:
+		#expand(config["analysis_dir"]+"/ReferenceComparisonPrimary/TPMDifferences/Splicing/{sample}_junc_compare.bed",sample=SAMPLES)
+		#expand(config["analysis_dir"]+"/ReferenceComparisonPrimary/TPMDifferences/zscores_{gene_or_isoform}diff_hg19_hg38.soutliers.txt.gz",
+		#		gene_or_isoform=GENE_OR_ISOFORMS)
+		expand(config["analysis_dir"]+"/ReferenceComparisonPrimary/TPMDifferences/zscores_{gene_or_isoform}diff_hg38_chm13NONENSEMBL.soutliers.txt.gz",
+				gene_or_isoform=GENE_OR_ISOFORMS)
+		# expand(config["analysis_dir"]+"/ReferenceComparisonPrimary/TPMDifferences/{tissue}."  + dupStatus + "_minMQ" + minMapQ + ".zscores_{gene_or_isoform}diff.hg19.hg38.txt.gz",
+		# 	tissue=TISSUES,gene_or_isoform=GENE_OR_ISOFORMS,tpm_or_z=TPM_OR_Z),
+		# expand(config["analysis_dir"]+"/ReferenceComparisonPrimary/TPMDifferences/{tissue}." + dupStatus + "_minMQ" + minMapQ + ".zscores_{gene_or_isoform}diff.hg19.chm13ensembl.txt.gz",
+		# 		tissue=TISSUES,gene_or_isoform=GENE_OR_ISOFORMS,tpm_or_z=TPM_OR_Z),
+		# expand(config["analysis_dir"]+"/ReferenceComparisonPrimary/TPMDifferences/{tissue}." + dupStatus + "_minMQ" + minMapQ + ".zscores_{gene_or_isoform}diff.hg38.chm13ensembl.txt.gz",
+		# 		tissue=TISSUES,gene_or_isoform=GENE_OR_ISOFORMS,tpm_or_z=TPM_OR_Z)
+		#expand(config["analysis_dir"]+"/ReferenceComparisonPrimary/TPMDifferences/zscores.sorted_dedup_filtered.{gene_or_isoform}diff.soutliers.txt.gz",
+		#	tissue=TISSUES,gene_or_isoform=GENE_OR_ISOFORMS,tpm_or_z=TPM_OR_Z)
+		#expand("/oak/stanford/groups/smontgom/shared/UDN/PreprocessingHG{build_num}/Splicing/LeafCutterMD/Junctions/{sample}.junc.sorted",
+		#	sample=SAMPLES,build_num=["19","38"]),
+rule genediff_udn:
+	input:
+		script=ancient("rare_build/OutlierAndTPM/hg19_hg38_TPM.R"),
+		hg19="/oak/stanford/groups/smontgom/shared/UDN/Output/hg19/eOutliers/{tissue}.hg19."  + dupStatus + "_minMQ" + minMapQ + "_rsem.{gene_or_isoform}.results",
+		hg38="/oak/stanford/groups/smontgom/shared/UDN/Output/hg38/eOutliers/{tissue}.hg38." + dupStatus + "_minMQ" + minMapQ + "_rsem.{gene_or_isoform}.results"
+		#hg38=config["eOutliers_dir"]+"/udn_hg38.tpm.txt.gz"
+	output:
+		outfile=config["analysis_dir"]+"/ReferenceComparisonPrimary/TPMDifferences/{tissue}." + dupStatus + "_minMQ" + minMapQ + ".tpm_{gene_or_isoform}diff.txt.gz"
+	shell:
+		"""
+		module load R
+		Rscript {input.script} --tpm_hg19 {input.hg19} --tpm_hg38 {input.hg38} --outfile {output.outfile}
+
+		"""
+
+rule get_exp_zdiff_hg19_hg38:
+	input:
+		script=ancient("rare_build/OutlierAndTPM/hg19_hg38_eOutlier.R"),
+		build1="/oak/stanford/groups/smontgom/shared/UDN/Output/hg19/eOutliers/{tissue}.hg19.sorted_opticalDup" + dupStatus + "_minMQ" + minMapQ + "_rsem.{gene_or_isoform}.zscores.txt",
+		build2="/oak/stanford/groups/smontgom/shared/UDN/Output/hg38/eOutliers/{tissue}.hg38.sorted_opticalDup" + dupStatus + "_minMQ" + minMapQ + "_rsem.{gene_or_isoform}.zscores.txt"
+		#hg38=config["eOutliers_dir"]+"/udn_hg38.tpm.txt.gz"
+	params:
+		build1_name="hg19",
+		build2_name="hg38"
+	output:
+		outfile=config["analysis_dir"]+"/ReferenceComparisonPrimary/TPMDifferences/{tissue}." + dupStatus + "_minMQ" + minMapQ + ".zscores_{gene_or_isoform}diff.hg19.hg38.txt.gz"
+	shell:
+		"""
+		module load R
+		Rscript {input.script} --build1 {input.build1} --build2 {input.build2} --outfile {output.outfile} \
+		 --build1_name {params.build1_name} --build2_name {params.build2_name}
+		"""
+
+rule get_exp_zdiff_hg38_t2t:
+	input:
+		script=ancient("rare_build/OutlierAndTPM/hg19_hg38_eOutlier.R"),
+		hg38="/oak/stanford/groups/smontgom/shared/UDN/Output/hg38/eOutliers/{tissue}.hg38.sorted_opticalDup" + dupStatus + "_minMQ" + minMapQ + "_rsem.{gene_or_isoform}.zscores.txt",
+		t2t="/oak/stanford/groups/smontgom/shared/UDN/Output/chm13/eOutliers/{tissue}.chm13ensembl.sorted_opticalDup" + dupStatus + "_minMQ" + minMapQ + "_rsem.{gene_or_isoform}.zscores.txt"
+		#hg38=config["eOutliers_dir"]+"/udn_hg38.tpm.txt.gz"
+	params:
+		build1_name="hg38",
+		build2_name="chm13"
+	output:
+		outfile=config["analysis_dir"]+"/ReferenceComparisonPrimary/TPMDifferences/{tissue}." + dupStatus + "_minMQ" + minMapQ + ".zscores_{gene_or_isoform}diff.hg38.chm13ensembl.txt.gz"
+	shell:
+		"""
+		module load R
+		Rscript {input.script} --build1 {input.hg38} --build2 {input.t2t} --outfile {output.outfile} \
+		 --build1_name {params.build1_name} --build2_name {params.build2_name}
+		"""
+rule get_exp_zdiff_hg19_t2t:
+	input:
+		script=ancient("rare_build/OutlierAndTPM/hg19_hg38_eOutlier.R"),
+		hg19="/oak/stanford/groups/smontgom/shared/UDN/Output/hg19/eOutliers/{tissue}.hg19.sorted_opticalDup" + dupStatus + "_minMQ" + minMapQ + "_rsem.{gene_or_isoform}.zscores.txt",
+		t2t="/oak/stanford/groups/smontgom/shared/UDN/Output/chm13/eOutliers/{tissue}.chm13ensembl.sorted_opticalDup" + dupStatus + "_minMQ" + minMapQ + "_rsem.{gene_or_isoform}.zscores.txt"
+		#hg38=config["eOutliers_dir"]+"/udn_hg38.tpm.txt.gz"
+	params:
+		build1_name="hg19",
+		build2_name="chm13"
+	output:
+		outfile=config["analysis_dir"]+"/ReferenceComparisonPrimary/TPMDifferences/{tissue}." + dupStatus + "_minMQ" + minMapQ + ".zscores_{gene_or_isoform}diff.hg19.chm13ensembl.txt.gz"
+	shell:
+		"""
+		module load R
+		Rscript {input.script} --build1 {input.hg19} --build2 {input.t2t} --outfile {output.outfile} \
+		 --build1_name {params.build1_name} --build2_name {params.build2_name}
+		"""
+rule get_spl_zdiff_hg19_hg38:
+	input:
+		script=ancient("rare_build/OutlierAndTPM/hg19_hg38_sOutlier.R"),
+		hg19="/oak/stanford/groups/smontgom/shared/UDN/Output/hg19/Splicing/SplitByInd/all_annotated_adjusted_zscores_collapsedby{gene_or_isoform}.hg19.sorted_dedupOptical_minMQ255.bed.gz",
+		hg38="/oak/stanford/groups/smontgom/shared/UDN/Output/hg38/Splicing/SplitByInd/all_annotated_adjusted_zscores_collapsedby{gene_or_isoform}.hg38.sorted_dedupOptical_minMQ255.bed.gz"
+		#hg38=config["eOutliers_dir"]+"/udn_hg38.tpm.txt.gz"
+	output:
+		outfile=config["analysis_dir"]+"/ReferenceComparisonPrimary/TPMDifferences/zscores_{gene_or_isoform}diff_hg19_hg38.soutliers.txt.gz"
+	shell:
+		"""
+		module load R
+		Rscript {input.script} --hg19 {input.hg19} --hg38 {input.hg38} --outfile {output.outfile}
+
+		"""
+rule get_spl_zdiff_hg38_t2t:
+	input:
+		script=ancient("rare_build/OutlierAndTPM/hg19_hg38_sOutlier.R"),
+		hg38="/oak/stanford/groups/smontgom/shared/UDN/Output/hg38/Splicing/SplitByInd/all_annotated_adjusted_zscores_collapsedby{gene_or_isoform}.hg38.sorted_dedupOptical_minMQ255.bed.gz",
+		chm13="/oak/stanford/groups/smontgom/shared/UDN/Output/chm13/Splicing/SplitByInd/all_annotated_adjusted_zscores_collapsedby{gene_or_isoform}.chm13.sorted_dedupOptical_minMQ255.bed.gz"
+		#hg38=config["eOutliers_dir"]+"/udn_hg38.tpm.txt.gz"
+	output:
+		outfile=config["analysis_dir"]+"/ReferenceComparisonPrimary/TPMDifferences/zscores_{gene_or_isoform}diff_hg38_chm13.soutliers.txt.gz"
+	shell:
+		"""
+		module load R
+		Rscript {input.script} --hg19 {input.hg38} --hg38 {input.chm13} --outfile {output.outfile}
+		"""
+rule get_spl_zdiff_hg38_t2tnonensembl:
+	input:
+		script=ancient("rare_build/OutlierAndTPM/hg19_hg38_sOutlier.R"),
+		hg38="/oak/stanford/groups/smontgom/shared/UDN/Output/hg38/Splicing/SplitByInd/all_annotated_adjusted_zscores_collapsedby{gene_or_isoform}.hg38.sorted_dedupOptical_minMQ255.bed.gz",
+		chm13="/oak/stanford/groups/smontgom/shared/UDN/Output/chm13/Splicing/SplitByInd/all_annotated_adjusted_zscores_collapsedby{gene_or_isoform}.chm13.sorted_dedupOptical_minMQ255.bed.gz"
+		#hg38=config["eOutliers_dir"]+"/udn_hg38.tpm.txt.gz"
+	output:
+		outfile=config["analysis_dir"]+"/ReferenceComparisonPrimary/TPMDifferences/zscores_{gene_or_isoform}diff_hg38_chm13NONENSEMBL.soutliers.txt.gz"
+	shell:
+		"""
+		module load R
+		Rscript {input.script} --hg19 {input.hg38} --hg38 {input.chm13} --outfile {output.outfile} --use_nonensembl "TRUE"
+		"""
+rule sort_juncs_for_comparison:
+	input:
+		"/oak/stanford/groups/smontgom/shared/UDN/PreprocessingHG{build_num}/Splicing/LeafCutterMD/Junctions/{sample}.regtools.junc"
+	output:
+		"/oak/stanford/groups/smontgom/shared/UDN/PreprocessingHG{build_num}/Splicing/LeafCutterMD/Junctions/{sample}.junc.sorted"
+	shell:
+		"""
+		sort -k 1,1 -k2,2n {input} > {output}
+		"""
+
+rule combine_juncs:
+	input:
+		hg19="/oak/stanford/groups/smontgom/shared/UDN/PreprocessingHG19Primary/Splicing/LeafCutterMD/Junctions/{sample}.junc.sorted",
+		hg38="/oak/stanford/groups/smontgom/shared/UDN/PreprocessingHG38Primary/Splicing/LeafCutterMD/Junctions/{sample}.junc.sorted",
+		bedtools=config["bedtools"]
+	output:
+		config["analysis_dir"]+"/ReferenceComparisonPrimary/TPMDifferences/Splicing/{sample}_junc_compare.bed"
+	shell:
+		"""
+		{input.bedtools} intersect -wa -wb -a {input.hg19} -b {input.hg38} -s |  awk -F"\t" '{{diff=$11-$5; print $0"\t"diff}}' > {output}
+		"""
+
+#rule genediff_tpm:
+#	input:
+#		script=config["scripts_dir"]+"/rare_build/OutlierAndTPMs/hg19_hg38_TPM.R",
+#		hg19=config["eOutliers_dir"]+"/dgn_hg19.tpm.txt.gz",
+#		hg38=config["eOutliers_dir"]+"/dgn_hg38.tpm.txt.gz"
+#	output:
+#		outfile=config["eOutliers_dir"]+"/tpm_dgn_genediff.txt.gz"
+#	shell:
+#		"""
+#		module load R
+#		Rscript {input.script} --tpm_hg19 {input.hg19} --tpm_hg38 {input.hg38} --outfile {output.outfile}
+#
+#		"""

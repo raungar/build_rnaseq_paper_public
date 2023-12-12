@@ -1,0 +1,111 @@
+import os, glob, yaml,sys
+import pandas as pd
+TISSUES=["Blood", "Fibroblast", "PBMC", "Muscle", "iPS", "iPSCNPC"]
+BUILDS=["hg19","hg38","chm13"]
+
+sample_table = pd.read_csv(config["sample_file"], sep='\t').set_index("SAMPLE", drop=False)
+sample_table.index.name = None
+sample_table.columns = sample_table.columns.str.upper()
+SAMPLES = list(sample_table.index.values)
+sample_to_tissue_dic= dict(zip(sample_table['SAMPLE'].to_list(), sample_table['TISSUE'].to_list()))
+
+rule all:
+    input:
+        expand("/oak/stanford/groups/smontgom/shared/UDN/Analysis/ReferenceComparisonPrimary/Mapping/{build}/mapping_{build}_{sample}.txt",
+        build=BUILDS,sample=SAMPLES),
+        expand("/oak/stanford/groups/smontgom/shared/UDN/Analysis/ReferenceComparisonPrimary/Mapping/{build}/mapping_{build}_{sample}_summarised.txt",
+        build=BUILDS,sample=SAMPLES),
+        expand("/oak/stanford/groups/smontgom/shared/UDN/Analysis/ReferenceComparisonPrimary/Mapping/mapping_{build}_{tissue}_allsamples_totals_meangene.txt.gz",
+        build=BUILDS,tissue=TISSUES),
+        expand("/oak/stanford/groups/smontgom/shared/UDN/Analysis/ReferenceComparisonPrimary/Mapping/mapping_{build}_{tissue}_allsamples_totals_meangene_CHM13ID.txt.gz",
+        build='chm13',tissue=TISSUES)
+
+
+def get_build_tissue_files(wildcards,SAMPLES):
+    my_sample_list=[]
+    for this_sample in SAMPLES:
+        this_tiss=wildcards.tissue
+        if(this_tiss=="iPSCNPC"):
+            this_tiss="iPSC_NPC"
+        if (sample_to_tissue_dic[this_sample] == this_tiss):
+            my_sample_list.append(this_sample)
+    return(my_sample_list)
+
+rule get_mapstats:
+    input:
+        bam_transcriptome=config["output_dir"]+"/{build}/STAROutput/{sample}_star_{build}_Aligned.toTranscriptome.out.bam"
+    params:
+        sample="{sample}",
+        build="{build}"
+    wildcard_constraints:
+        build="^[^_]*$"
+    output:
+        outfile="/oak/stanford/groups/smontgom/shared/UDN/Analysis/ReferenceComparisonPrimary/Mapping/mapping_{build}_{sample}.txt"
+    shell:
+        """
+        module load samtools 
+        samtools view {input} | cut -d$'\t' -f3,12  | awk -F"[ |:]" -v build="{params.build}" -v sample="{params.sample}" '{{print build"\t"sample"\t"$1"\t"$NF}}' > {output}
+
+        """
+rule combine_mapstats:
+    input:
+        expand("/oak/stanford/groups/smontgom/shared/UDN/Analysis/ReferenceComparisonPrimary/Mapping/mapping_{build}_{sample}.txt",build=BUILDS,sample=SAMPLES)
+    output:
+        "/oak/stanford/groups/smontgom/shared/UDN/Analysis/ReferenceComparisonPrimary/Mapping/mapping_all.txt"
+    shell:
+        """
+        cat {input} > {output}
+        """
+rule summarise_stats:
+    input:
+        infile="/oak/stanford/groups/smontgom/shared/UDN/Analysis/ReferenceComparisonPrimary/Mapping/{build}/mapping_{build}_{sample}.txt"
+    output:
+        outfile="/oak/stanford/groups/smontgom/shared/UDN/Analysis/ReferenceComparisonPrimary/Mapping/{build}/mapping_{build}_{sample}_summarised.txt"
+    shell:
+        """
+        module load R
+        Rscript /oak/stanford/groups/smontgom/raungar/UDN/rare_build/QC/collapse_mapping.R --infile {input} --outfile {output}
+        """
+# sample=lambda wildcards: get_build_tissue_files(wildcards)) #[x if sample_to_tissue_dic[x]==wildcards.tissue for x in wildcards.sample]
+rule combine_by_build_and_tissue:
+    input:
+        infile_gene=lambda wildcards: expand("/oak/stanford/groups/smontgom/shared/UDN/Analysis/ReferenceComparisonPrimary/Mapping/{{build}}/mapping_{{build}}_{sample}_summarised.txt", sample=get_build_tissue_files(wildcards,SAMPLES))
+    params:
+        tissue="{tissue}"
+    output:
+        outfile_gene_mean="/oak/stanford/groups/smontgom/shared/UDN/Analysis/ReferenceComparisonPrimary/Mapping/mapping_{build}_{tissue}_allsamples_summarised.txt.gz"
+
+    shell:
+        """
+        #second grep removes headers from each of these files
+        cat {input.infile_gene} | grep -v "uniquely_mapped" | gzip -c > {output.outfile_gene_mean}
+        """
+
+rule summarise_gene_level:
+    input:
+        infile="/oak/stanford/groups/smontgom/shared/UDN/Analysis/ReferenceComparisonPrimary/Mapping/mapping_{build}_{tissue}_allsamples_summarised.txt.gz",
+        gtf="/oak/stanford/groups/smontgom/shared/UDN/Analysis/ReferenceComparisonPrimary/ReferenceFiles/{build}_enstANDensg.txt"
+    params:
+        build="{build}"
+    output:
+        outfile="/oak/stanford/groups/smontgom/shared/UDN/Analysis/ReferenceComparisonPrimary/Mapping/mapping_{build}_{tissue}_allsamples_totals_gene.txt.gz",
+        outfile_mean="/oak/stanford/groups/smontgom/shared/UDN/Analysis/ReferenceComparisonPrimary/Mapping/mapping_{build}_{tissue}_allsamples_totals_meangene.txt.gz"
+    shell:
+        """
+        module load R
+        Rscript /oak/stanford/groups/smontgom/raungar/UDN/rare_build/QC/mapping_add_in_ensg.R --build {params.build} --infile {input.infile} --gtf_file {input.gtf} --outfile {output.outfile} --outfile_mean {output.outfile_mean}
+        """
+rule summarise_gene_level_chm13:
+    input:
+        infile="/oak/stanford/groups/smontgom/shared/UDN/Analysis/ReferenceComparisonPrimary/Mapping/mapping_{build}_{tissue}_allsamples_summarised.txt.gz",
+        gtf="/oak/stanford/groups/smontgom/shared/UDN/Analysis/ReferenceComparisonPrimary/ReferenceFiles/{build}_enstANDensg.txt"
+    params:
+        build="{build}"
+    output:
+        outfile="/oak/stanford/groups/smontgom/shared/UDN/Analysis/ReferenceComparisonPrimary/Mapping/mapping_{build}_{tissue}_allsamples_totals_gene_CHM13ID.txt.gz",
+        outfile_mean="/oak/stanford/groups/smontgom/shared/UDN/Analysis/ReferenceComparisonPrimary/Mapping/mapping_{build}_{tissue}_allsamples_totals_meangene_CHM13ID.txt.gz"
+    shell:
+        """
+        module load R
+        Rscript /oak/stanford/groups/smontgom/raungar/UDN/rare_build/QC/mapping_add_in_CHM13.R --build {params.build} --infile {input.infile} --gtf_file {input.gtf} --outfile {output.outfile} --outfile_mean {output.outfile_mean}
+        """
