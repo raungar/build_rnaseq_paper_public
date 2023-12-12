@@ -40,7 +40,7 @@ Under analysis_scripts
 # environment_paths.yaml
 There should be no direct paths in the snakemake. Please add any paths to the yaml file.
 
-#External Data Resources
+# External Data Resources
  - hg19 annotation: https://www.gencodegenes.org/human/release_35lift37.html > Comprehensive gene annotation (Regions: CHR) 
  - hg38 annotation: https://www.gencodegenes.org/human/release_35.html > Comprehensive gene annotation (Regions: CHR)
  - CHM13v2.0 Annotation: https://github.com/marbl/CHM13#gene-annotation > UCSC GENCODEv35 CAT/Liftoff v2
