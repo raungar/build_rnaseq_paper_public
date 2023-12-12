@@ -1,0 +1,344 @@
+import os,glob,re
+import pandas as pd
+
+target_builds = config["builds"]
+if "target_build" in config:
+    target_builds = config["target_build"]
+TISSUES=["Blood","Fibroblast"]
+
+sample_table = pd.read_csv(config["sample_file"], sep='\t').set_index("SAMPLE", drop=False)
+sample_table=sample_table.drop(remove_samples)
+sample_table=sample_table[sample_table['TISSUE'].isin(TISSUES)]
+SAMPLES=sample_table['SAMPLE'].to_list()
+FEATURES=["isoforms","genes","exons"]
+FEATURES=["genes"]
+MAPQFILTERS=["sorted_dedup_filtered"]
+
+
+# get pixel distance as a wildcard list
+if "PIXEL_DIST" in sample_table:
+    #print("Getting pixel distance for optical duplicates from sample table")
+    PXDIST_LIST = list(sample_table.PIXEL_DIST)
+elif "pixel_distance" in config:
+    #print("Getting pixel distance for optical duplicates from config file")
+    PXDIST_LIST = [ config["pixel_distance"] ] * len(sample_table.index)
+else:
+    #print("Using default pixel distance for optical duplicates: 100px")
+    PXDIST_LIST = [100] * len(sample_table.index)
+# How to handle duplicates
+remove_all_duplicates = config["remove_all_duplicates"]
+remove_optical_duplicates = config["remove_optical_duplicates"]
+mark_duplicates = config["mark_duplicates"]
+
+if remove_all_duplicates:
+    dupStatus = "dedupAll"
+    #print("Removing all duplicate reads (including PCR and optical duplicates)")
+elif remove_optical_duplicates:
+    dupStatus = "dedupOptical"
+    #print("Removing optical duplicates only")
+else:
+    dupStatus = "dedupNone"
+    #print("Will not remove duplicates")
+minMapQ = config["min_mapping_quality"]
+
+#to convert wildcards to what is actually in the output
+def get_gtf_names(wildcards):
+	this_feat=wildcards.feature
+	if(this_feat=="isoforms"):
+		return "transcript"
+	if(this_feat=="genes"):
+		return "gene"
+	if(this_feat=="exons"):
+		return "exon"
+		
+def get_ind_output_zscores(this_sample):
+	this_tissue=md_dic[this_sample]
+	return(config["output_dir"]+"/{build}/Splicing"+"/SplitByInd/"+this_tissue+"_"+this_sample+".txt")
+
+#print(TISSUES)
+#print(SAMPLES)
+#print(PXDIST_LIST)
+
+# PXDIST_LIST=["12000"]
+
+rule all:
+	input:
+		# expand(config["output_dir"]+"/{build}/Splicing"+"/{tissue}.{build}.sorted_" + dupStatus + "_minMQ" + minMapQ +".juncfiles.txt",
+		# expand(expand(config["output_dir"]+"/{{build}}/Splicing"+"/SplitByInd/{sample}.{{build}}.sorted_opticalDup{pxdist}_" + dupStatus + "_minMQ" + minMapQ +".juncannogenes.bed",
+		#   zip,sample=SAMPLES, pxdist = PXDIST_LIST),build=target_builds),
+		# expand(config["output_dir"]+"/{build}/Splicing"+"/SplitByInd/all_annotated_adjusted_zscores_collapsedby{feature}.{build}.sorted_" + dupStatus + "_minMQ" + minMapQ +".bed.gz",
+		#  	feature=FEATURES,build=target_builds),
+		expand(expand(config["output_dir"]+"/{{build}}/Splicing"+"/Junctions/{sample}.{{build}}.sorted_opticalDup{pxdist}_" + dupStatus + "_minMQ" + minMapQ +".junc.anno.bed",
+		 		zip,sample=SAMPLES, pxdist = PXDIST_LIST),build=target_builds),
+		expand(config["output_dir"]+"/{build}/Splicing"+"/SplitByInd/all_annotated_adjusted_zscores_collapsedby{feature}.{build}.sorted_" + dupStatus + "_minMQ" + minMapQ +".bed.gz",
+				feature=FEATURES,build=target_builds),
+		expand(config["output_dir"]+"/{build}/Splicing"+"/SplitByInd/{tissue}_split_by_sample.{build}.sorted_" + dupStatus + "_minMQ" + minMapQ +".log",
+		 		tissue=TISSUES,build=target_builds),
+		# expand(config["output_dir"]+"/{build}/Splicing"+"/udn_{tissue}.{build}.sorted_" + dupStatus + "_minMQ" + minMapQ +"_zscores.txt",
+		# 	sample=SAMPLES,tissue=TISSUES,build=target_builds)
+		expand(expand(config["output_dir"]+"/{{build}}/Splicing"+"/SplitByInd/{sample}_{{feature}}.{{build}}.sorted_opticalDup{pxdist}_" + dupStatus + "_minMQ" + minMapQ +".collapsed.bed",
+		 	zip,sample=SAMPLES, pxdist = PXDIST_LIST),feature=FEATURES,build=target_builds)	
+		# expand(expand(config["output_dir"]+"/{{build}}/BAMs"+"/{sample}_star_{{build}}_Aligned.sortedByCoord.sorted_opticalDup{pxdist}_" + dupStatus + "_minMQ" + minMapQ +".bam.bai",
+		# 		zip,sample=SAMPLES, pxdist = PXDIST_LIST),build=target_builds),
+		# expand(config["output_dir"]+"/{build}/Splicing"+"/SplitByInd/{sample}_juncanno.bed" ,sample=SAMPLES),
+        #         
+		# expand(config["output_dir"]+"/{build}/Splicing"+"/{tissue}_regtools_juncfiles.txt",tissue=TISSUES)
+
+
+#regtools requires indexed bam file
+rule index_bam_for_regtools:
+	input:
+		bam=(config["output_dir"]+"/{build}/BAMs"+"/{sample}_star_{build}_Aligned.sortedByCoord.sorted_opticalDup{pxdist}_" + dupStatus + "_minMQ" + minMapQ +".bam"),
+		samtools=config["samtools"]
+	output:
+		bai=config["output_dir"]+"/{build}/BAMs"+"/{sample}_star_{build}_Aligned.sortedByCoord.sorted_opticalDup{pxdist}_" + dupStatus + "_minMQ" + minMapQ +".bam.bai"
+	shell:
+		"""
+		{input.samtools} index {input.bam}
+		"""
+#use regtools to extract junctions
+rule bam_to_junc_regtools:
+	input:
+		this_bam=config["output_dir"]+"/{build}/BAMs"+"/{sample}_star_{build}_Aligned.sortedByCoord.sorted_opticalDup{pxdist}_" + dupStatus + "_minMQ" + minMapQ +".bam",
+		this_bai=config["output_dir"]+"/{build}/BAMs"+"/{sample}_star_{build}_Aligned.sortedByCoord.sorted_opticalDup{pxdist}_" + dupStatus + "_minMQ" + minMapQ +".bam.bai",
+		regtools=config["regtools"]
+	output:
+		this_junc=config["output_dir"]+"/{build}/Splicing"+"/Junctions/{sample}.{build}.sorted_opticalDup{pxdist}_" + dupStatus + "_minMQ" + minMapQ +".junc"
+	shell:
+		"""	
+		{input.regtools} junctions extract {input.this_bam} -o {output} -s 0 
+		"""
+
+#annotate these junctions, used for better understanding of what's happening, not a necessary step
+rule annotate_juncs:
+	input:
+		fa=lambda wildcards: config["builds"][wildcards.build]["fa_unzip"],
+		gtf=lambda wildcards: config["builds"][wildcards.build]["gtf_unzip"],
+		regtools=config["regtools"],
+		regtools_headers=ancient("/oak/stanford/groups/smontgom/shared/UDN/ReferenceFiles/regtools_headers.tsv")
+	params:
+		bed=config["output_dir"]+"/{build}/Splicing"+"/Junctions/{sample}.{build}.sorted_opticalDup{pxdist}_" + dupStatus + "_minMQ" + minMapQ +".junc",
+		build="{build}"
+	output:
+		config["output_dir"]+"/{build}/Splicing"+"/Junctions/{sample}.{build}.sorted_opticalDup{pxdist}_" + dupStatus + "_minMQ" + minMapQ +".junc.anno.bed"
+	shell:
+		"""
+		if [[ {params.build} != "hg38" ]]
+		then
+				cp {input.regtools_headers} {output}
+		else
+                {input.regtools} junctions annotate {params.bed} {input.fa} {input.gtf} -o {output}
+		fi
+		"""
+#as per leafcutter workflow, aggregate all file paths to cluster in one file, do so at a per-tissue level
+#This part of the workflow could definitely be improved in a more snakemakey way, right now just using a log file for rule order
+#Should honestly do a def get_tissue_files, and then return a list of files within that tissue for cleaner pipeline
+
+#assumes period delimeter!!
+rule get_all_samples:
+	input:
+		files=(expand(expand(config["output_dir"]+"/{{build}}/Splicing"+"/Junctions/{sample}.{{build}}.sorted_opticalDup{pxdist}_" + dupStatus + "_minMQ" + minMapQ +".junc",zip,sample=SAMPLES, pxdist = PXDIST_LIST ),build=target_builds)),
+		md=ancient(config["sample_file"])
+	params:
+		leafcutter_dir=config["output_dir"]+"/{build}/Splicing"+"/Junctions",
+		tissue="{tissue}",
+		col_in_md_sample="3",
+		col_in_md_tissue="5",
+		juncsuffix="minMQ*junc"
+	output:
+		all_samples=config["output_dir"]+"/{build}/Splicing"+"/{tissue}.{build}.sorted_" + dupStatus + "_minMQ" + minMapQ +".juncfiles.txt"
+	shell:
+		"""
+		set +e #this silently fails otherwise 
+		echo "THIS IS THE TISEUE: {params.tissue}"
+		for file in `ls {params.leafcutter_dir}/*{params.juncsuffix}`
+		do
+			sample=`echo $file | awk -F"/" '{{print $NF}}' | awk -F"\." '{{print $1}}'`
+			tiss=`cat {input.md} | awk -F"\t" -v sample_col={params.col_in_md_sample} -v tissue_col={params.col_in_md_tissue} '{{print $sample_col"\t"$tissue_col}}'  | grep $sample'\t' | awk -F"\t" '{{print $2}}'`
+			echo "$sample: $tiss == {params.tissue}"
+			if [[ "$tiss" == "{params.tissue}" ]]
+			then
+				echo $file >> {output.all_samples}
+			fi
+		done
+		exitcode=$?
+		echo "exit code: $exitcode"
+		"""
+#follows leafcutter workflow, cluster introns
+rule intron_clustering:
+	input:
+		this_script=ancient(config["tools_dir"]+"/leafcutter/clustering/leafcutter_cluster_regtools.py"),
+		file_list=(config["output_dir"]+"/{build}/Splicing"+"/{tissue}.{build}.sorted_" + dupStatus + "_minMQ" + minMapQ +".juncfiles.txt")
+	params:
+		min_read_support=50,
+		max_intron_len=500000,
+		leafcutter_dir=config["output_dir"]+"/{build}/Splicing"+"/Junctions",
+		#output_prefix=config["output_dir"]+"/{build}/Splicing"+"/Junctions/udn_{tissue}"
+		output_prefix="udn_{tissue}.{build}.sorted_" + dupStatus + "_minMQ" + minMapQ 
+	output:
+		config["output_dir"]+"/{build}/Splicing"+"/Junctions/udn_{tissue}.{build}.sorted_" + dupStatus + "_minMQ" + minMapQ +"_perind.counts.gz",
+		config["output_dir"]+"/{build}/Splicing"+"/Junctions/udn_{tissue}.{build}.sorted_" + dupStatus + "_minMQ" + minMapQ +"_perind_numers.counts.gz"
+	shell:
+		"""
+		module load samtools perl R
+		python2.7 {input.this_script} -j {input.file_list}  -m {params.min_read_support} -o {params.output_prefix} -l {params.max_intron_len} --rundir {params.leafcutter_dir} --nochromcheck "True"
+		"""
+#follow leafcuttermd workflow, get outliers
+rule outlier_calling:
+	input:
+		this_script=(config["tools_dir"]+"/leafcutter/scripts/leafcutterMD.R"),
+		cluster=config["output_dir"]+"/{build}/Splicing"+"/Junctions/udn_{tissue}.{build}.sorted_" + dupStatus + "_minMQ" + minMapQ +"_perind_numers.counts.gz"
+	params:
+		output_prefix=config["output_dir"]+"/{build}/Splicing"+"/udn_{tissue}.{build}.sorted_" + dupStatus + "_minMQ" + minMapQ 
+	output:
+		config["output_dir"]+"/{build}/Splicing"+"/udn_{tissue}.{build}.sorted_" + dupStatus + "_minMQ" + minMapQ +"_pVals.txt"
+	shell:
+		"""
+		module load samtools perl R
+		{input.this_script} -o {params.output_prefix} {input.cluster}
+		"""
+#multiple testing correct pval, convert to z-score
+rule p_to_z:
+	input:
+		this_script=ancient(config["scripts_dir"]+"/splicing_analysis/outlier/leafcutter_p_to_z.R"),
+		pvals=config["output_dir"]+"/{build}/Splicing"+"/udn_{tissue}.{build}.sorted_" + dupStatus + "_minMQ" + minMapQ +"_pVals.txt"
+	output:
+		zscores=config["output_dir"]+"/{build}/Splicing"+"/udn_{tissue}.{build}.sorted_" + dupStatus + "_minMQ" + minMapQ +"_zscores.txt"
+	shell:
+		"""
+		module load R
+		Rscript {input.this_script} --infile {input.pvals} --outfile {output.zscores}
+		"""
+#split by sample for a per-sample report and parallelization
+rule split_by_sample:
+	input:
+		config["output_dir"]+"/{build}/Splicing"+"/udn_{tissue}.{build}.sorted_" + dupStatus + "_minMQ" + minMapQ +"_zscores.txt"
+	params:
+		outdir=config["output_dir"]+"/{build}/Splicing"+"/SplitByInd/",
+		suffix=".{build}.sorted_" + dupStatus + "_minMQ" + minMapQ +".txt"
+	output:
+		log=config["output_dir"]+"/{build}/Splicing"+"/SplitByInd/{tissue}_split_by_sample.{build}.sorted_" + dupStatus + "_minMQ" + minMapQ +".log"
+	shell:
+		"""
+		less {input} | \
+			sed 's/:/\t/g; s/,/\t/g; s/\..*\t/\t/g' | tail -n +2 | \
+			awk -F"\t" -v prefix={params.outdir} -v suffix={params.suffix} '{{print (!a[$5]++? $0 : $0)  > prefix$5suffix}}'
+		less {input} |
+			sed 's/:/\t/g; s/,/\t/g; s/\..*\t/\t/g' | tail -n +2   | \
+			awk -F"\t" '{{print $5}}' | sort | uniq > {output}
+		"""
+###I don't know how to get snakemake to wait for the unknown output from these files
+## look into using checkpoint dynamic or something but couldn't figure it out quickly
+#sort these files for bedtools
+rule sort_split:
+	input:
+		bedtools=config["bedtools"],
+		log=expand(config["output_dir"]+"/{build}/Splicing"+"/SplitByInd/{tissue}_split_by_sample.{build}.sorted_" + dupStatus + "_minMQ" + minMapQ +".log",sample=SAMPLES,tissue=TISSUES,build=target_builds) 
+	params:
+		sample=(config["output_dir"]+"/{build}/Splicing"+"/SplitByInd/{sample}.{build}.sorted_" + dupStatus + "_minMQ" + minMapQ +".txt")
+	output:
+		outfile=config["output_dir"]+"/{build}/Splicing"+"/SplitByInd/{sample}.{build}.sorted_" + dupStatus + "_minMQ" + minMapQ +".sorted.bed"
+	shell:
+		"""
+		{input.bedtools} sort -i {params.sample} > {output}
+		"""
+#annotate with regtool junc anno file for description for each junciton
+rule zannotate_juncs:
+	input:
+		zscores=config["output_dir"]+"/{build}/Splicing"+"/SplitByInd/{sample}.{build}.sorted_" + dupStatus + "_minMQ" + minMapQ +".sorted.bed",
+		junc_anno=config["output_dir"]+"/{build}/Splicing"+"/Junctions/{sample}.{build}.sorted_opticalDup{pxdist}_" + dupStatus + "_minMQ" + minMapQ +".junc.anno.bed",
+		bedtools=config["bedtools"]
+	output:
+		z_anno=config["output_dir"]+"/{build}/Splicing"+"/SplitByInd/{sample}.{build}.sorted_opticalDup{pxdist}_" + dupStatus + "_minMQ" + minMapQ +".juncanno.bed"
+	shell:
+		"""
+		{input.bedtools} intersect -a {input.zscores} -b {input.junc_anno} -loj | sed 's/\t*$//' > {output}
+		"""
+##annotate with gtf file to get nearest gene
+## for speed, perhaps the order of zannotate_genes and zannotate_juncs should be switch bc the gtf file is much larger? not sure if that will make a difference
+rule remove_header:
+	input:
+		gtf=lambda wildcards: config["builds"][wildcards.build]["gtf_unzip"],
+		gff=lambda wildcards: config["builds"][wildcards.build]["gff3_unzip"]
+
+	params:
+		gtf_out=lambda wildcards: config["builds"][wildcards.build]["gtf_unzip"]+".sorted.noheader.chronly",
+		gff_out=lambda wildcards: config["builds"][wildcards.build]["gff3_unzip"]+".sorted.noheader.chronly",
+		build="{build}"
+	output:
+		fakelog=config["output_dir"]+"/{build}/Splicing/{build}_changegtf.sorted.chronly.log"
+	shell:
+		"""
+		if [[ {params.build} == "chm13" ]]
+		then
+			grep -v "##" {input.gff} |  awk -F"\t" '{{print $1"\t"$4"\t"$5"\t"$9}}' | awk '$1~/^[^#]/' | sort -k 1,1 -k2,2n > {params.gff_out}
+		else
+			grep -v "##" {input.gtf} |  awk -F"\t" '{{print $1"\t"$4"\t"$5"\t"$9}}' | awk '$1~/^chr/' | sort -k 1,1 -k2,2n > {params.gtf_out}
+		fi
+		echo "{params}" >> {output.fakelog}
+		"""
+rule get_nonzero_only:
+	input:
+		zscores=config["output_dir"]+"/{build}/Splicing"+"/SplitByInd/{sample}.{build}.sorted_opticalDup{pxdist}_" + dupStatus + "_minMQ" + minMapQ +".juncanno.bed",
+	output:
+		zscores_nozeros=config["output_dir"]+"/{build}/Splicing"+"/SplitByInd/{sample}.{build}.sorted_opticalDup{pxdist}_" + dupStatus + "_minMQ" + minMapQ +".juncanno.nonzero.bed",
+	shell:
+		"""
+		awk -F"\t" '{{if($6 !=0) print $0}}' {input} > {output} 
+		"""
+rule zannotate_genes:
+	input:
+		zscores=config["output_dir"]+"/{build}/Splicing"+"/SplitByInd/{sample}.{build}.sorted_opticalDup{pxdist}_" + dupStatus + "_minMQ" + minMapQ +".juncanno.bed",
+		fake_log_for_order=config["output_dir"]+"/{build}/Splicing/{build}_changegtf.sorted.chronly.log",
+		bedtools=config["bedtools"]
+	params:
+		gtf=lambda wildcards: config["builds"][wildcards.build]["gtf_unzip"]+".sorted.noheader.chronly",
+		gff=lambda wildcards: config["builds"][wildcards.build]["gff3_unzip"]+".sorted.noheader.chronly",
+		build="{build}"
+	output:
+		z_anno=config["output_dir"]+"/{build}/Splicing"+"/SplitByInd/{sample}.{build}.sorted_opticalDup{pxdist}_" + dupStatus + "_minMQ" + minMapQ +".juncannogenes.bed"
+	shell:
+		"""
+		if [[ {params.build} == "chm13" ]]
+		then
+			{input.bedtools} intersect -a {input.zscores} -b {params.gff} -loj -sorted > {output}
+		else
+			{input.bedtools} intersect -a {input.zscores} -b {params.gtf} -loj -sorted > {output}
+		fi
+		"""
+rule collapse_top_feature:
+	input:
+		#sample=config["output_dir"]+"/{build}/Splicing"+"/SplitByInd/{sample}_{feature}.{build}.sorted_opticalDup{pxdist}_" + dupStatus + "_minMQ" + minMapQ +".bed",
+		sample=config["output_dir"]+"/{build}/Splicing"+"/SplitByInd/{sample}.{build}.sorted_opticalDup{pxdist}_" + dupStatus + "_minMQ" + minMapQ +".juncannogenes.bed",
+		myscript_hg38=ancient(config["scripts_dir"]+"/splicing_analysis/outlier/collapse_to_featurelevel.py"),
+		myscript_hg19=ancient(config["scripts_dir"]+"/splicing_analysis/outlier/collapse_to_featurelevel_hg19.py"),
+		myscript_chm13=ancient(config["scripts_dir"]+"/splicing_analysis/outlier/collapse_to_featurelevel_chm13.py")
+	params:
+		feat="{feature}",
+		build="{build}"
+	output:
+		config["output_dir"]+"/{build}/Splicing"+"/SplitByInd/{sample}_{feature}.{build}.sorted_opticalDup{pxdist}_" + dupStatus + "_minMQ" + minMapQ +".collapsed.bed"
+	shell:
+		"""
+		if [[ {params.build} == "chm13" ]]
+		then
+			python {input.myscript_chm13} --infile {input.sample} --level {params.feat} --out {output}
+		elif [[ {params.build} == "hg19" ]]
+		then
+			python {input.myscript_hg19} --infile {input.sample} --level {params.feat} --out {output}
+		else
+			python {input.myscript_hg38} --infile {input.sample} --level {params.feat} --out {output}
+		fi
+		"""
+## might want to move this to the analysis pipeline
+## combines all files for downstream analyses
+rule combine_features:
+	input:
+		(expand(expand(config["output_dir"]+"/{{build}}/Splicing"+"/SplitByInd/{sample}_{{feature}}.{{build}}.sorted_opticalDup{pxdist}_" + dupStatus + "_minMQ" + minMapQ +".collapsed.bed",zip,sample=SAMPLES, pxdist = PXDIST_LIST ),build=target_builds,feature=FEATURES))
+	output:
+		config["output_dir"]+"/{build}/Splicing"+"/SplitByInd/all_annotated_adjusted_zscores_collapsedby{feature}.{build}.sorted_" + dupStatus + "_minMQ" + minMapQ +".bed.gz"
+	shell:
+		"""
+		cat {input} | gzip -c > {output}
+		"""
+

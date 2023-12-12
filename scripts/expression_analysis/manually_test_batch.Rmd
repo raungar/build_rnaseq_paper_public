@@ -1,0 +1,121 @@
+---
+title: "SVA_ANALYSIS"
+output: pdf
+---
+#### libraries
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(corrplot)
+library(dplyr)
+library(tibble)
+library(data.table)
+library(ggplot2)
+```
+
+#### prepare metadata
+```{r}
+tissue_type="Blood"
+build="hg19"
+# tissue_type="Fibroblast"
+sva_fit=readRDS(paste0("/Volumes/groups/smontgom/shared/UDN/Output/",build,"/eOutliers/",tissue_type,".",build,".sorted_opticalDupdedupOptical_minMQ255_rsem.genes.svafit.RData")) #/Blood.hg19.sorted_opticalDupdedupOptical_minMQ255_rsem.genes.svafit.RData
+
+sv_data<-sva_fit$sv
+metadata<-as.data.frame(fread(paste0("/Volumes/groups/smontgom/shared/UDN/Data/Metadata/2017to2022_metadata.tsv")))
+# rownames(metadata)<-metadata$SAMPLE
+rownames(metadata)<-metadata$sample_id
+metadata<-metadata[metadata$sample_id %in% rownames(sv_data),]#[rownames(sv_data),]
+metadata$read_length<-as.factor(metadata$read_length)
+metadata$seq_batch<-as.factor(metadata$seq_batch)
+metadata$globin_depletion<-addNA(as.factor(metadata$globin_depletion))
+metadata$disease_category<-addNA(as.factor(metadata$disease_category))
+metadata$seq_machine<-addNA(as.factor(metadata$seq_machine))
+metadata$origin<-addNA(as.factor(metadata$origin))
+metadata$date_collected<-addNA(as.factor(metadata$date_collected))
+metadata$date_prepped<-addNA(as.factor(metadata$date_prepped))
+metadata$date_sequenced<-addNA(as.factor(metadata$date_sequenced))
+metadata$library_conc_source<-addNA(as.factor(metadata$library_conc_source))
+metadata$library_avg_bp<-addNA(as.numeric(metadata$library_avg_bp))
+metadata$library_conc_nM<-addNA(as.numeric(as.character(metadata$library_conc_nM)))
+
+```
+
+##get correlations
+```{r, echo=F}
+# metadata_to_cor_mod <- cbind(model.matrix(~STATUS+RUN, data=metadata[,c("STATUS","RUN")]),"READ_LENGTH"=metadata[,"READ_LENGTH"]) #+
+#metadata[,c("STATUS","RUN","READ_LENGTH","sex","seq_machine","INSTITUTION","disease_category","metadata"
+
+metadata_to_cor_mod <- cbind(model.matrix(~1+seq_batch+sex+ seq_machine + #library_prep_lab
+                                            institution+read_length+
+                                            date_collected+date_prepped+date_sequenced+
+                                            origin+affected_status+disease_category+
+                                            globin_depletion+
+                                            library_conc_source,
+                                          data=metadata)] #,
+                             metadata[,c("RIN","age",
+                                         "260_280","260_230",
+                                         #"library_conc_nM"),#"library_conc_ng_per_ul" <--- this has ranges
+                                         "rna_conc_qubit_ng_per_ul")]) #,"library_avg_bp"
+                                         #)])
+metadata_to_cor_mod <- (metadata[,c("RIN","age",
+                                         "260_280","260_230",
+                                         "library_conc_nM" ,"library_conc_ng_per_ul",# <--- this has ranges
+                                         "rna_conc_qubit_ng_per_ul")]) #,"library_avg_bp"
+                                         #)])
+metadata_to_cor_mod=t(apply(as.matrix(metadata_to_cor_mod),1,as.numeric))
+rownames(metadata_to_cor_mod)<-metadata$sample_id
+colnames(metadata_to_cor_mod)<-c("RIN","age",
+                                         "260_280","260_230",
+                                         "library_conc_nM" ,"library_conc_ng_per_ul",# <--- this has ranges
+                                         "rna_conc_qubit_ng_per_ul")
+
+thismd <- cbind(model.matrix(~1+seq_batch , data=metadata[rownames(sv_data),]), "RIN"=metadata[rownames(sv_data),"RIN"]) 
+mycor<-cor(metadata_to_cor_mod[rownames(sv_data),],sv_data,method = "spearman",use="everything")
+thismdmycor<-cor(thismd,sv_data,method = "spearman",use="complete.obs")
+mycor<-cor(metadata_to_cor_mod[rownames(sv_data),],sv_data,method = "spearman",use="complete.obs")
+
+
+```
+
+
+## get plots for correlations
+```{r}
+par(ps=8)
+corrplot(mycor[51:100,])
+
+library(cluster) 
+cluster_cor <- agnes(na.omit(thismdmycor), method = "ward")
+cluster_cor <- agnes(na.omit(mycor), method = "ward")
+pltree(cluster_cor, cex = 0.8, hang = -1, main = "Cluster of SV Correlates: HG19 Blood") 
+
+
+###run by rin
+ggplot(metadata,aes(x=as.factor(seq_batch),y=RIN,fill=tissue))+geom_violin()+theme_bw()+ggtitle("RIN across runs")+facet_wrap(~seq_batch,scales="free_x")+ylim(c(0,10))
+```
+
+##How did our data change pre/post correction?
+```{r}
+#PCA calculation
+# tissue_type="Fibroblast"
+
+##original
+counts_og<-fread(paste0("/Volumes/groups/smontgom/shared/UDN/Output/",build,"/eOutliers/",tissue_type,".",build,".sorted_opticalDupdedupOptical_minMQ255_rsem.genes.transformedbeforesva.txt")) %>%column_to_rownames("V1")
+#Blood.hg19.sorted_opticalDupdedupOptical_minMQ255_rsem.genes.transformedbeforesva.txt
+pcs_original<-prcomp(counts_og) #
+to_plot_original<-cbind(as.data.frame(pcs_original$x),metadata)%>%mutate(correction_status="before correction")
+# ggplot(to_plot_original,aes(x=PC1,y=PC2,color=RUN))+geom_point()+
+#   theme_bw()+ggtitle(paste0("Original: ",tissue_type)) #+
+#   scale_colour_gradient2(low="blue",mid="purple",high="red",midpoint=7)
+###corrected
+counts_corrected<-fread(paste0("/Volumes/groups/smontgom/shared/UDN/Output/",build,"/eOutliers/",tissue_type,".",build,".sorted_opticalDupdedupOptical_minMQ255_rsem.genes.svaresids.txt")) %>%column_to_rownames("V1")
+pcs_corrected<-prcomp(counts_corrected)
+to_plot_corrected<-cbind(as.data.frame(pcs_corrected$x),metadata) %>%mutate(correction_status="after correction")
+to_plot<-rbind(to_plot_original,to_plot_corrected)
+ggplot(to_plot,aes(x=PC1,y=PC2,color=RUN,shape=sex))+geom_point()+
+  theme_bw()+ggtitle(paste0(tissue_type,": hg",build))+facet_wrap(~correction_status)
+  #scale_colour_gradient2(low="blue",mid="purple",high="red",midpoint=7)%>%
+
+
+```
+
+
+

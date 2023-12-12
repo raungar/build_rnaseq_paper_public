@@ -1,0 +1,163 @@
+import os,glob,re
+import pandas as pd
+
+BUILDS = ["hg38"]
+sample_table = pd.read_csv(config["sample_file"], sep='\t').set_index("SAMPLE", drop=False)
+sample_table.index.name = None
+sample_table_filt=sample_table #[sample_table['TISSUE'].isin(TISSUES)]
+SAMPLES=sample_table_filt['SAMPLE'].to_list()
+remove_samples=[""]
+sample_table=sample_table.drop(remove_samples)
+SAMPLES = list(sample_table.index.values) 
+
+
+sample_table_filt=sample_table.loc[sample_table['STATUS']=="Case"]
+SAMPLES_CASES = list(sample_table.index.values) 
+
+GENES_OR_ISOFORMS=["genes"] #,"isoforms"]
+
+# get pixel distance as a wildcard list
+if "PIXEL_DIST" in sample_table:
+    #print("Getting pixel distance for optical duplicates from sample table")
+    PXDIST_LIST = list(sample_table.PIXEL_DIST)
+elif "pixel_distance" in config:
+    #print("Getting pixel distance for optical duplicates from config file")
+    PXDIST_LIST = [ config["pixel_distance"] ] * len(sample_table.index)
+else:
+    #print("Using default pixel distance for optical duplicates: 100px")
+    PXDIST_LIST = [100] * len(sample_table.index)
+
+sample_to_pxdist={SAMPLES[i]: PXDIST_LIST[i] for i in range(len(SAMPLES))}
+# How to handle duplicates
+remove_all_duplicates = config["remove_all_duplicates"]
+remove_optical_duplicates = config["remove_optical_duplicates"]
+mark_duplicates = config["mark_duplicates"]
+
+if remove_all_duplicates:
+    dupStatus = "dedupAll"
+    #print("Removing all duplicate reads (including PCR and optical duplicates)")
+elif remove_optical_duplicates:
+    dupStatus = "dedupOptical"
+    #print("Removing optical duplicates only")
+else:
+    dupStatus = "dedupNone"
+    #print("Will not remove duplicates")
+minMapQ = config["min_mapping_quality"]
+GENE_OR_ISOFORMS=["genes"]
+ 
+
+rule all:
+	input:
+		expand(config["output_dir"]+"/{build}/OutputForGCs/{sample}_{build}_{genes_or_isoforms}_sOUTLIERSONLY.txt",
+			sample=SAMPLES_CASES,genes_or_isoforms=GENES_OR_ISOFORMS,build=BUILDS)
+		#expand(config["euan_dir"]+"/{build}/"+sample_table.loc[wildcards.sample]['INDIVIDUAL']+"_"+sample_table.loc[wildcards.sample]['TISSUE']+"{sample}_{build}_{genes_or_isoforms}.txt",
+		# expand(config["output_dir"]+"/{build}/OutputForGCs/{sample}_{build}_{genes_or_isoforms}.sent.log",
+		# 	sample=SAMPLES,genes_or_isoforms=GENES_OR_ISOFORMS,build=BUILDS)
+
+
+
+def get_vcf(wildcards):
+	file_name=config["output_dir"]+"/"+wildcards.build+"/VCFs/RVAnnotated/"+sample_table.loc[wildcards.sample]['INDIVIDUAL']+"_cadd.tsv.gz"
+	print(file_name)
+	if os.path.exists(file_name):
+		return(file_name)
+	else:
+		return("NoFile")
+
+def get_z_exp_udnonly(wildcards):
+	file_name=config["output_dir"]+"/"+wildcards.build+"/eOutliers/SplitByInd/"+wildcards.sample+"."+wildcards.genes_or_isoforms+".txt"
+	#print(file_name)
+	if os.path.isfile(file_name):
+		return(file_name)
+	else:
+		#print(file_name)
+		return("NoFile")
+def get_z_exp_wgtex(wildcards):
+	#file_name=config["eOutliers_dir"]+"/SplitByInd/"+wildcards.sample+".UDNwithGTEx.txt"
+	file_name="NA" #break intentionally
+	if os.path.isfile(file_name):
+		return(file_name)
+	else:
+		#print(file_name)
+		return("NoFile")
+def get_z_spl(wildcards):
+	#file_name=config["leafcutter_dir"]+"/SplitByInd/"+wildcards.sample+"_w{genes_or_isoforms}_uniq.bed"
+	#file_name=config["leafcutter_dir"]+"/SplitByInd/collapsed_"+wildcards.sample+"_"+wildcards.genes_or_isoforms+".bed"
+	file_name=config["output_dir"]+"/"+wildcards.build+"/Splicing/SplitByInd/"+wildcards.sample+"_"+wildcards.genes_or_isoforms+"."+wildcards.build+".sorted_opticalDup"+str(sample_to_pxdist[wildcards.sample])+"_" + dupStatus + "_minMQ" + minMapQ + ".collapsed.bed"
+	#print(file_name)
+	if os.path.isfile(file_name):
+		return(file_name)
+	else:
+		#print(file_name)
+		return("NoFile")
+
+def get_med_counts(wildcards):
+	#filename=lambda wildcards: config["eOutliers_dir"]+"/gtex_"+sample_table.loc[wildcards.sample]['TISSUE']+"_{build}.medianTPM.txt.gz"
+	file_name=config["analysis_dir"]+"/ReferenceComparison/TPMDifferences/"+sample_table.loc[wildcards.sample]['TISSUE']+"_tpm_"+wildcards.genes_or_isoforms+"diff.txt.gz"
+	#print(file_name)
+	#ReferenceComparison/TPMDifferences/{tissue}_tpm_{gene_or_isoform}diff.txt.gz
+	if os.path.isfile(file_name):
+		return(file_name)
+	else:
+		#print(file_name)
+		return("NoFile")
+
+def get_out_convert(wildcards):
+	return config["euan_dir"]+"/"+wildcards.build+"/results/"+sample_table.loc[wildcards.sample]['INDIVIDUAL']+"_"+sample_table.loc[wildcards.sample]['TISSUE']+"_"+wildcards.sample+"_"+wildcards.build+"_"+wildcards.genes_or_isoforms+".txt"
+
+
+#combine tpm output with expected gtex for that tissue and gene annotation file
+rule combine_all:
+	input:
+		script=ancient(config["scripts_dir"]+"/output/combine_everything.R"),
+		tpm=lambda wildcards: config["output_dir"]+"/{build}/RSEM/{sample}.{build}.sorted_opticalDup"+str(sample_to_pxdist[wildcards.sample])+"_" + dupStatus + "_minMQ" + minMapQ + "_rsem."+wildcards.genes_or_isoforms+".results",
+		anno_file=config["reference_files_dir"]+"/combined_gene_disease_info.txt.gz",
+		md=config["metadata"]
+	params:
+		vcf=get_vcf,
+		splicing_zscore=get_z_spl,
+		expression_zscore_udn=get_z_exp_udnonly,
+		med_file=get_med_counts,
+		expression_zscore_wgtex=get_z_exp_wgtex,
+		build="{build}",	
+		genes_or_isoforms="{genes_or_isoforms}",
+		sample="{sample}",
+		ase_zscore="NoFile" # replace later
+	output:
+		outfile=config["output_dir"]+"/{build}/OutputForGCs/{sample}_{build}_{genes_or_isoforms}.txt",
+		outfile_eOutliers=config["output_dir"]+"/{build}/OutputForGCs/{sample}_{build}_{genes_or_isoforms}_eOUTLIERSONLY.txt",
+		outfile_sOutliers=config["output_dir"]+"/{build}/OutputForGCs/{sample}_{build}_{genes_or_isoforms}_sOUTLIERSONLY.txt"
+	shell:
+		"""
+		module load R
+
+		echo "{input.script} --tpm {input.tpm} --med_counts {params.med_file} --anno_file {input.anno_file} --genes_or_isoforms {params.genes_or_isoforms} \
+			--vcf {params.vcf} --metadata {input.md}  --outfile {output.outfile} \
+			--outfile_outliers_spl {output.outfile_sOutliers} --outfile_outliers_exp {output.outfile_eOutliers} --sample {params.sample} \
+			--splicing_zscore {params.splicing_zscore} --ase_zscore {params.ase_zscore} --build {params.build} \
+			--expression_zscore_udn {params.expression_zscore_udn} --expression_zscore_wgtex {params.expression_zscore_wgtex} "
+
+		Rscript {input.script} \
+			--tpm {input.tpm} --med_counts {params.med_file} --anno_file {input.anno_file} --genes_or_isoforms {params.genes_or_isoforms} \
+			--vcf {params.vcf} --metadata {input.md}  --outfile {output.outfile} \
+			--outfile_outliers_spl {output.outfile_sOutliers} --outfile_outliers_exp {output.outfile_eOutliers} --sample {params.sample} \
+			--splicing_zscore {params.splicing_zscore} --ase_zscore {params.ase_zscore} --build {params.build} \
+			--expression_zscore_udn {params.expression_zscore_udn} --expression_zscore_wgtex {params.expression_zscore_wgtex} 
+	
+
+		"""
+
+rule convert_for_gcs:
+	input:
+		outfile=config["output_dir"]+"/{build}/OutputForGCs/{sample}_{build}_{genes_or_isoforms}.txt",
+	params:
+		newout=get_out_convert
+		#newout=config["euan_dir"]+"/{build}/"+sample_table.loc["{sample}"]['INDIVIDUAL']+"_"+sample_table.loc["{sample}"]['TISSUE']+"{sample}_{build}_{genes_or_isoforms}.txt"
+	output:
+		log=config["output_dir"]+"/{build}/OutputForGCs/{sample}_{build}_{genes_or_isoforms}.sent.log"
+	shell:
+		"""
+		cp {input} {params}
+		echo "cp {input} {params}" > {output}
+		"""
+

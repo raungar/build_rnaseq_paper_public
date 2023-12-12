@@ -1,0 +1,152 @@
+##preprocessing paths
+###star_annot_hg38: "/reference/RefGenomes/H_sapiens/hg38/indexes/STAR/2.7.1a/iGenomes"
+target_build: ["hg38"]
+pixel_distance: "2500"
+min_mapping_quality: "255"
+remove_all_duplicates: False # mark, but do not remove all duplicates
+remove_optical_duplicates: True # remove optical duplicates
+mark_duplicates: "All" #["OpticalOnly", "DontTag"]
+is_T2T: True
+
+output_dir: "/oak/stanford/groups/smontgom/shared/UDN/Output"
+results_dir: "/oak/stanford/groups/smontgom/shared/UDN/ResultsForGCs"
+qc_dir: "/oak/stanford/groups/smontgom/shared/UDN/QCReports"
+
+builds:
+    hg19:
+        fa: "/oak/stanford/groups/smontgom/shared/UDN/ReferenceFiles/GENCODEv35_GRCh37.p13/GRCh37.primary_assembly.genome.fa.gz"
+        fa_unzip: "/oak/stanford/groups/smontgom/shared/UDN/ReferenceFiles/GENCODEv35_GRCh37.p13/GRCh37.primary_assembly.genome.fa"
+        gff3: "/oak/stanford/groups/smontgom/shared/UDN/ReferenceFiles/GENCODEv35_GRCh37.p13/gencode.v35lift37.primary_assembly.annotation.gff3.gz"
+        gff3_unzip: "/oak/stanford/groups/smontgom/shared/UDN/ReferenceFiles/GENCODEv35_GRCh37.p13/gencode.v35lift37.primary_assembly.annotation.gff3"
+        gtf: "/oak/stanford/groups/smontgom/shared/UDN/ReferenceFiles/GENCODEv35_GRCh37.p13/gencode.v35lift37.annotation.gtf.gz"
+        gtf_unzip: "/oak/stanford/groups/smontgom/shared/UDN/ReferenceFiles/GENCODEv35_GRCh37.p13/gencode.v35lift37.annotation.gtf"
+        star_annot_ov75: "/oak/stanford/groups/smontgom/shared/UDN/ReferenceFiles/STAR2.7.4a_INDEX_hg19_ov75"
+        star_annot_ov99: "/oak/stanford/groups/smontgom/shared/UDN/ReferenceFiles/STAR2.7.4a_INDEX_hg19_ov99"
+        rsem_ref: "/oak/stanford/groups/smontgom/shared/UDN/ReferenceFiles/RSEM_REF_hg19"
+        preproccessing_dir: "/oak/stanford/groups/smontgom/shared/UDN/PreprocessingHG19"
+        qc_dir: "/oak/stanford/groups/smontgom/shared/UDN/QCReports/MultiqcHG19"
+        chain: "/oak/stanford/groups/smontgom/shared/UDN/ReferenceFiles/hg38ToHg19.over.chain.gz"
+    hg38:
+        fa: "/oak/stanford/groups/smontgom/shared/UDN/ReferenceFiles/GENCODEv35_GRCh38.p13/GRCh38.primary_assembly.genome.fa.gz"
+        fa_unzip: "/oak/stanford/groups/smontgom/shared/UDN/ReferenceFiles/GENCODEv35_GRCh38.p13/GRCh38.primary_assembly.genome.fa"
+        gff3: "/oak/stanford/groups/smontgom/shared/UDN/ReferenceFiles/GENCODEv35_GRCh38.p13/gencode.v35.primary_assembly.annotation.gff3.gz"
+        gff3_unzip: "/oak/stanford/groups/smontgom/shared/UDN/ReferenceFiles/GENCODEv35_GRCh38.p13/gencode.v35.primary_assembly.annotation.gff3"
+        gtf: "/oak/stanford/groups/smontgom/shared/UDN/ReferenceFiles/GENCODEv35_GRCh38.p13/gencode.v35.primary_assembly.annotation.gtf.gz"
+        gtf_unzip: "/oak/stanford/groups/smontgom/shared/UDN/ReferenceFiles/GENCODEv35_GRCh38.p13/gencode.v35.primary_assembly.annotation.gtf"
+        rsem_ref: "/oak/stanford/groups/smontgom/shared/UDN/ReferenceFiles/RSEM_REF_hg38"
+        star_annot_ov75: "/oak/stanford/groups/smontgom/shared/UDN/ReferenceFiles/STAR2.7.4a_INDEX_hg38_ov75"
+        star_annot_ov99: "/oak/stanford/groups/smontgom/shared/UDN/ReferenceFiles/STAR2.7.4a_INDEX_hg38_ov99"
+        preproccessing_dir: "/oak/stanford/groups/smontgom/shared/UDN/PreprocessingHG38Primary"
+        qc_dir: "/oak/stanford/groups/smontgom/shared/UDN/QCReports/MultiqcHG38"
+        chain: "/oak/stanford/groups/smontgom/shared/UDN/ReferenceFiles/hg19ToHg38.over.chain.gz"
+    chm13:
+        fa: "/oak/stanford/groups/smontgom/shared/UDN/ReferenceFiles/CHM13v2.0/chm13v2.0_maskedY.fa.gz"
+        fa_unzip: "/oak/stanford/groups/smontgom/shared/UDN/ReferenceFiles/CHM13v2.0/chm13v2.0_maskedY.fa"
+        # gff3: "/oak/stanford/groups/smontgom/shared/UDN/ReferenceFiles/CHM13v2.0/GCA_009914755.4_genes.gff3.gz"
+        gff3_unzip: "/oak/stanford/groups/smontgom/shared/UDN/ReferenceFiles/CHM13v2.0/chm13.draft_v2.0.gene_annotation.gff3"
+        # gtf: "/oak/stanford/groups/smontgom/shared/UDN/ReferenceFiles/CHM13v2.0/GCF_009914755.1_T2T-CHM13v2.0_genomic.gtf.gz"
+        # gtf_unzip: "/oak/stanford/groups/smontgom/shared/UDN/ReferenceFiles/CHM13v2.0/GCF_009914755.1_T2T-CHM13v2.0_genomic.gtf"
+        star_annot_ov75: "/oak/stanford/groups/smontgom/shared/UDN/ReferenceFiles/STAR2.7.4a_INDEX_chm13_ov75"
+        star_annot_ov99: "/oak/stanford/groups/smontgom/shared/UDN/ReferenceFiles/STAR2.7.4a_INDEX_chm13_ov99"
+        rsem_ref: "/oak/stanford/groups/smontgom/shared/UDN/ReferenceFiles/RSEM_REF_chm13"
+        preproccessing_dir: "/oak/stanford/groups/smontgom/shared/UDN/PreprocessingT2T"
+        qc_dir: "/oak/stanford/groups/smontgom/shared/UDN/QCReports/MultiqcT2T"
+            # output directories are:
+            # bam_dir: "/oak/stanford/groups/smontgom/shared/UDN/PreprocessingT2T/BAMs"
+            # qc_dir: "/oak/stanford/groups/smontgom/shared/UDN/PreprocessingT2T/QCReports"
+            # star_dir: "/oak/stanford/groups/smontgom/shared/UDN/PreprocessingT2T/STAROutput"
+            # rsem_dir: "/oak/stanford/groups/smontgom/shared/UDN/PreprocessingT2T/RSEM"
+            # eOutliers_dir: "/oak/stanford/groups/smontgom/shared/UDN/PreprocessingT2T/eOutliers"
+        #gff3_unzip: "/oak/stanford/groups/smontgom/shared/UDN/ReferenceFiles/CHM13v2.0/GCA_009914755.4_genes.gff3"
+
+tmp_dir: "/tmp/tannerj/STAR"
+###changing for current compatibility this will change
+#bam_dir: "/oak/stanford/groups/smontgom/shared/UDN/PreprocessingT2T/BAMs"
+#qc_dir: "/oak/stanford/groups/smontgom/shared/UDN/PreprocessingT2T/QCReports"
+#star_dir: "/oak/stanford/groups/smontgom/shared/UDN/PreprocessingT2T/STAROutput"
+#rsem_dir: "/oak/stanford/groups/smontgom/shared/UDN/PreprocessingT2T/RSEM"
+scripts_dir: "/oak/stanford/groups/smontgom/raungar/UDN/rare_disease/scripts"
+#multiqc_dir: "/oak/stanford/groups/smontgom/shared/UDN/QCReports/MultiqcT2T"
+#fastqc_dir: "/oak/stanford/groups/smontgom/shared/UDN/PreprocessingT2T/QCReports"
+
+#eOutliers_dir: "/oak/stanford/groups/smontgom/shared/UDN/PreprocessingT2T/eOutliers"
+#star_annot_ov75: "/oak/stanford/groups/smontgom/shared/UDN/ReferenceFiles/STAR2.7.4a_INDEX_chm13_ov75"
+#star_annot_ov99: "/oak/stanford/groups/smontgom/shared/UDN/ReferenceFiles/STAR2.7.4a_INDEX_chm13_ov99"
+#rsem_ref: "/oak/stanford/groups/smontgom/shared/UDN/ReferenceFiles/RSEM_REF_chm13"
+
+# tools
+STAR: "/scg/apps/software/star/2.7.8a/bin/STAR"
+samtools: "/scg/apps/software/samtools/1.12/bin/samtools"
+picard: "/scg/apps/software/picard/2.27.1/picard"
+rsem: "/scg/apps/software/rsem/1.3.1/bin"
+fastqc: "/scg/apps/software/fastqc/0.11.9/FastQC/fastqc"
+multiqc: "/scg/apps/software/multiqc/1.11/bin/multiqc"
+
+####
+analysis_dir: "/oak/stanford/groups/smontgom/shared/UDN/Analysis"
+fastq_original_dir: "/oak/stanford/groups/smontgom/kssmith/RARECARE/SEQ_RUN"
+fastq_dir: "/oak/stanford/groups/smontgom/shared/UDN/Data/FASTQ"
+
+# preproccessing_dir: "/oak/stanford/groups/smontgom/shared/UDN/PreprocessingT2T"
+# output_dir: "/oak/stanford/groups/smontgom/shared/UDN/OutputForGCsT2T"
+
+UDN_output: "/oak/stanford/groups/smontgom/shared/UDN/Output"
+durga_dir: "/oak/stanford/groups/smontgom/shared/UDN/Data/VCFs"
+dgn_dir: "/oak/stanford/groups/smontgom/shared/dgn"
+euan_dir: "/oak/stanford/groups/euan/UDN/montgomery"
+bcl2fastqc_dir: ''
+fastqc_dir: ''
+bcl_dir: "/oak/staanford/groups/smontgom/kssmith/RARECARE/SEQ_RUN"
+
+#references
+metadata: "/oak/stanford/groups/smontgom/shared/UDN/Data/Metadata/2017to2022_metadata.tsv"
+sample_file: "/oak/stanford/groups/smontgom/shared/UDN/Data/SampleTables/sample_table_UDN_sep2023.txt"
+ped_dir: "/oak/stanford/groups/euan/UDN/gateway/metadata/ped"
+metadata_vcfs: "/oak/stanford/groups/euan/UDN/gateway/metadata/tsv/Stanford_sequencing_metadata_v2.csv"
+reference_files_dir: "/oak/stanford/groups/smontgom/shared/UDN/ReferenceFiles"
+
+gnomad_all: "/oak/stanford/groups/smontgom/shared/gnomadv3/gnomad.genomes.r3.0.sites.vcf.bgz"
+gnomad_dir: "/oak/stanford/groups/smontgom/shared/gnomadv3"
+cadd_files_dir: "/oak/stanford/groups/smontgom/shared/UDN/ReferenceFiles/CADDv1.6/data/prescored/GRCh38_v1.6/incl_anno"
+gtex_tpm: "/oak/stanford/groups/smontgom/shared/GTEx/all_data/GTEx_Analysis_2017-06-05_v8/rna_seq/GTEx_Analysis_2017-06-05_v8_RSEMv1.3.0_gene_tpm.gct.gz"
+gtex_metadata: "/oak/stanford/groups/smontgom/shared/GTEx/all_data/GTEx_Analysis_2017-06-05_v8/sample_annotations/GTEx_Analysis_2017-06-05_v8_Annotations_SampleAttributesDS.txt"
+gtex_metadata_wsex: "/oak/stanford/groups/smontgom/shared/GTEx/all_data/GTEx_Analysis_2017-06-05_v8/sample_annotations/GTEx_Analysis_2017-06-05_v8_Annotations_SubjectPhenotypesDS_v2_downloaded_april2020.txt"
+dgn_metadata: ""
+pivus_metadata: "/oak/stanford/groups/smontgom/shared/UDN/ReferenceFiles/PIVUS_RNASequencingInfo.csv"
+mohammadi_ref_eagle: "/oak/stanford/groups/smontgom/shared/UDN/PejmanCollaboration/references_transfer/references/eagle/1000genomes_eagle_ref_panel/ready_for_eagle_and_shapeit"
+mohammadi_refdir: "/oak/stanford/groups/smontgom/shared/UDN/PejmanCollaboration/references_transfer/references"
+mohammadi_script_annotate_ase: "/oak/stanford/groups/smontgom/shared/UDN/PejmanCollaboration/RNASEQ_pipeline/src/annotate_ase_py3.py"
+mohammadi_ase_annotation_dir: "/oak/stanford/groups/smontgom/shared/UDN/PejmanCollaboration/references_transfer/references/ase_annotation"
+rv_annot: "/oak/stanford/groups/smontgom/shared/UDN/PreprocessingHG38Primary/VCFs/RVAnnotated"
+
+#tools
+tabulator: "/oak/stanford/groups/smontgom/shared/UDN/Tools/tabulator"
+vep: "/oak/stanford/groups/smontgom/shared/UDN/Tools/ensembl-vep/./vep"
+tools_dir: "/oak/stanford/groups/smontgom/shared/UDN/Tools"
+CADD: "/oak/stanford/groups/smontgom/shared/UDN/ReferenceFiles/CADDv1.6"
+eagle_dir: "/oak/stanford/groups/smontgom/shared/UDN/Tools/Eagle_v2.4.1"
+phaser: "/oak/stanford/groups/smontgom/shared/UDN/Tools/phaser"
+slivar: "/oak/stanford/groups/smontgom/shared/UDN/ReferenceFiles/slivar"
+bedtools: "/scg/apps/legacy/software/bedtools/2.27.1/bedtools2/bin/bedtools"
+
+#more tools that were for some reason removed??
+STAR: "/scg/apps/software/star/2.7.8a/bin/STAR"
+bcftools: "/scg/apps/software/bcftools/1.12/bin/bcftools"
+bgzip: "/scg/apps/legacy/software/tabix/tabix-0.2.6/bgzip"
+tabix: "/scg/apps/legacy/software/tabix/tabix-0.2.6/tabix"
+samtools: "/scg/apps/software/samtools/1.12/bin/samtools"
+picard: "/scg/apps/software/picard/2.27.1/picard"
+gatk: "/scg/apps/legacy/software/gatk/gatk-4.0.10.0/gatk"
+python3: "/home/raungar/.pyenv/shims/python3"
+python2: "/scg/apps/software/python/2.7.18/bin/python"
+java: "/usr/bin/java"
+rsem: "/scg/apps/software/rsem/1.3.1/bin"
+vcftools: "/scg/apps/legacy/software/vcftools/0.1.12/bin/vcftools"
+Rscript: "/scg/apps/software/r/3.6/bin/Rscript"
+R: "/scg/apps/software/r/3.6/bin/R"
+fastqc: "/scg/apps/software/fastqc/0.11.9/FastQC/fastqc"
+multiqc: "/scg/apps/software/multiqc/1.11/bin/multiqc"
+rmats: "/scg/apps/software/rmats-turbo/4.1.1/rMATS/rmats.py"
+regtools: "/scg/apps/software/regtools/0.5.2/regtools"
+featureCounts: "/scg/apps/software/subread/2.0.6/bin/featureCounts"
+vcfanno: "/home/raungar/.conda/envs/UDN/envs/snakemake/bin/vcfanno"

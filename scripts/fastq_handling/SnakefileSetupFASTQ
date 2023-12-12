@@ -1,0 +1,74 @@
+import os,glob
+
+# get build
+target_builds = config["builds"]
+if "target_build" in config:
+    target_builds = config["target_build"]
+
+rule all:
+	input:
+		expand(config["output_dir"]+"/{build}/RSEM/rsem_reference.log",build=target_builds),
+		expand(config["reference_files_dir"]+"/STAR2.7.4a_INDEX_{build}_ov75.log",build=target_builds),
+		expand(config["reference_files_dir"]+"/STAR2.7.4a_INDEX_{build}_ov99.log",build=target_builds)
+
+rule make_rsem_reference:
+	input:
+		gtf=lambda wildcards: config["builds"][wildcards.build]["gtf_unzip"],
+		fasta=lambda wildcards: config["builds"][wildcards.build]["fa_unzip"]
+	params:
+		ref=lambda wildcards: config["builds"][wildcards.build]["rsem_ref"]
+	output:
+		this_log=config["output_dir"]+"/{build}/RSEM/rsem_reference.log"
+	shell:
+		"""
+		module load rsem/1.3.1
+		echo "generating rsem/1.3.1 reference... " > {output.this_log}
+		rsem-prepare-reference --gtf {input.gtf} \
+			--bowtie2 \
+			{input.fasta} \
+			{params.ref}
+			echo "complete. " >> {output.this_log}
+		"""
+
+rule create_star_annot_75:
+	input:
+		fa=lambda wildcards: config["builds"][wildcards.build]["fa_unzip"],
+		gtf=lambda wildcards: config["builds"][wildcards.build]["gtf_unzip"]
+	params:
+		overhang=75,
+		star=lambda wildcards: config["builds"][wildcards.build]["STAR"],
+		index_dir=lambda wildcards: config["builds"][wildcards.build]["star_annot_ov75"] #config["star_annot_ov99"]
+	output:
+		this_log=config["reference_files_dir"]+"/STAR2.7.4a_INDEX_{build}_ov75.log"
+	shell:
+		"""
+		#module load STAR/2.7.4a; 
+		echo "creating annotation file";
+		{params.star} --runMode genomeGenerate \
+			--genomeDir {params.index_dir} \
+			--genomeFastaFiles {input.fa} \
+			--sjdbGTFfile {input.gtf} \
+			--sjdbOverhang {params.overhang} > {output.this_log}
+		"""
+
+rule create_star_annot_99:
+	input:
+		fa=lambda wildcards: config["builds"][wildcards.build]["fa_unzip"],
+		gtf=lambda wildcards: config["builds"][wildcards.build]["gtf_unzip"]
+	params:
+		overhang=99,
+		star=config["STAR"],
+		index_dir=lambda wildcards: config["builds"][wildcards.build]["star_annot_ov99"]
+	output:
+		this_log=config["reference_files_dir"]+"/STAR2.7.4a_INDEX_{build}_ov99.log"
+	shell:
+		"""
+		#module load STAR/2.7.4a; 
+		echo "creating annotation file";
+		{params.star} --runMode genomeGenerate \
+			--genomeDir {params.index_dir} \
+			--genomeFastaFiles {input.fa} \
+			--sjdbGTFfile {input.gtf} \
+			--sjdbOverhang {params.overhang} > {output.this_log}
+		"""
+

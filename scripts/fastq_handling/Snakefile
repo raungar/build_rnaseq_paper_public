@@ -1,0 +1,440 @@
+import os, glob, yaml
+import pandas as pd
+
+from pprint import pprint
+#pprint(config["builds"])
+
+# get build
+target_builds = config["builds"]
+if "target_build" in config:
+    target_builds = config["target_build"]
+
+#print("Target builds:", target_builds)
+
+# samples and meta data
+#print("Reading samples from:\n" + config["sample_file"])
+sample_table = pd.read_csv(config["sample_file"], sep='\t').set_index("SAMPLE", drop=False)
+sample_table.index.name = None
+sample_table.columns = sample_table.columns.str.upper()
+SAMPLES = list(sample_table.index.values)
+#print(SAMPLES)
+
+# function to get additional sample data (for readability)
+def get_fastq(wildcards, read):
+    run = str(sample_table.loc[wildcards.sample, "RUN"]) if "RUN" in list(sample_table.columns.values) else ""
+    return config["fastq_dir"] + "/FASTQ_RUN" + run + "/" + wildcards.sample + "_merge_R" + read + ".trimmed.fastq.gz"
+
+def get_readlen(wildcards):
+    return sample_table.loc[(wildcards.sample), "READ_LENGTH"]
+
+def get_vcf(wildcards):
+    if "VCF_FOR_ASE" in sample_table:
+        return sample_table.loc[(wildcards.sample), "VCF_FOR_ASE"]
+    else:
+        return "NA"
+
+def get_STAR_implementation(wildcards):
+    vcf = str(get_vcf(wildcards))
+    return True if os.path.exists(vcf) and os.stat(vcf).st_size > 0 else False
+
+def get_STAR_message(wildcards):
+    vcf = str(get_vcf(wildcards))
+    if os.path.exists(vcf):
+        if os.stat(vcf).st_size > 0:
+            status = "WASP"
+        else:
+            status = "Standard\nreason: " + vcf + " is empty"
+    elif vcf == "NA":
+        status = "Standard\nreason: no VCF provided"
+    else:
+        status = "Standard\nreason: " + vcf + " could not be found"
+    return status
+
+
+def rename_bam(wildcards):
+    return config["euan_dir"]+"/"+wildcards.build+"/BAM/"+ \
+           sample_table.loc[wildcards.sample]['INDIVIDUAL']+"_"+ \
+           sample_table.loc[wildcards.sample]['TISSUE']+"_"+ \
+           wildcards.sample+"."+str(wildcards.alignment)+".bam"
+
+# make directories if necessary
+# for dir in [ config["fastq_dir"], 
+#              expand(config["output_dir"]+"/{build}/STAROutput", build= target_builds), 
+#              expand(config["output_dir"]+"/{build}/BAMs", build= target_builds), 
+#              expand(config["output_dir"]+"/{build}/RSEM", build= target_builds)
+#             ]:
+#     try:
+#         os.makedirs(dir, exist_ok = True)
+#     except OSError as e:
+#         raise
+
+# pixel distance from sample table, config, or default
+def get_optical_dup_distance(wildcards):
+    if "PIXEL_DIST" in sample_table:
+        return sample_table.loc[(wildcards.sample), "PIXEL_DIST"]
+    elif "pixel_distance" in config:
+        return config["pixel_distance"]
+    else:
+        return "100"
+
+# get pixel distance as a wildcard list
+if "PIXEL_DIST" in sample_table:
+    #print("Getting pixel distance for optical duplicates from sample table")
+    PXDIST_LIST = list(sample_table.PIXEL_DIST)
+elif "pixel_distance" in config:
+    #print("Getting pixel distance for optical duplicates from config file")
+    PXDIST_LIST = [ config["pixel_distance"] ] * len(sample_table.index)
+else:
+    #print("Using default pixel distance for optical duplicates: 100px")
+    PXDIST_LIST = [100] * len(sample_table.index)
+
+#print(PXDIST_LIST)
+
+# How to handle duplicates
+remove_all_duplicates = config["remove_all_duplicates"]
+remove_optical_duplicates = config["remove_optical_duplicates"]
+mark_duplicates = config["mark_duplicates"]
+
+if remove_all_duplicates:
+    dupStatus = "dedupAll"
+    #print("Removing all duplicate reads (including PCR and optical duplicates)")
+elif remove_optical_duplicates:
+    dupStatus = "dedupOptical"
+    #print("Removing optical duplicates only")
+else:
+    dupStatus = "dedupNone"
+    #print("Will not remove duplicates")
+
+
+# Additional wildcards
+ALIGNMENTS = ["sortedByCoord","toTranscriptome"]
+
+# Make mapping quality filtering flexible
+# minMapQ = "255" # TO DO: add to config; add wildcard list option
+minMapQ = config["min_mapping_quality"]
+
+
+rule_all_files=(
+        # STAR output
+        expand(config["output_dir"]+"/{build}/STAROutput/{sample}_star_{build}_Aligned.{alignment}.out.bam", 
+               sample=SAMPLES, alignment=ALIGNMENTS, build=target_builds),
+        # sorted bam
+        expand(config["output_dir"]+"/{build}/BAMs/{sample}_star_{build}_Aligned.{alignment}.sorted.bam", 
+               sample=SAMPLES, alignment=ALIGNMENTS, build=target_builds),
+        # deduplicated bam
+        expand(expand(config["output_dir"]+"/{{build}}/BAMs/{sample}_star_{{build}}_Aligned.{{alignment}}.sorted_opticalDup{pxdist}_" + dupStatus + ".bam", 
+               zip, sample=SAMPLES, pxdist = PXDIST_LIST), alignment=ALIGNMENTS, build=target_builds),
+        # mapping-qual filtered bam
+        expand(expand(config["output_dir"]+"/{{build}}/BAMs/{sample}_star_{{build}}_Aligned.{{alignment}}.sorted_opticalDup{pxdist}_" + dupStatus + "_minMQ" + minMapQ + ".bam", 
+               zip, sample=SAMPLES, pxdist = PXDIST_LIST), alignment=ALIGNMENTS, build=target_builds),
+        # filtered bam formatted for RSEM
+        expand(expand(config["output_dir"]+"/{{build}}/BAMs/{sample}_star_{{build}}_Aligned.toTranscriptome.sorted_opticalDup{pxdist}_" + dupStatus + "_minMQ" + minMapQ + "_rsem.bam", 
+               zip, sample=SAMPLES, pxdist = PXDIST_LIST), alignment=ALIGNMENTS, build=target_builds),
+        # RSEM results
+        expand(expand(config["output_dir"]+"/{{build}}/RSEM/{sample}.{{build}}.sorted_opticalDup{pxdist}_" + dupStatus + "_minMQ" + minMapQ + "_rsem.genes.results", 
+               zip, sample=SAMPLES, pxdist = PXDIST_LIST), build=target_builds),
+        expand(expand(config["output_dir"]+"/{{build}}/RSEM/{sample}.{{build}}.sorted_opticalDup{pxdist}_" + dupStatus + "_minMQ" + minMapQ + "_rsem.isoforms.results", 
+               zip, sample=SAMPLES, pxdist = PXDIST_LIST), build=target_builds),
+        expand(expand(config["output_dir"]+"/{{build}}/RSEM/{sample}.{{build}}.sorted_opticalDup{pxdist}_" + dupStatus + "_minMQ" + minMapQ + "_rsem.log", 
+               zip, sample=SAMPLES, pxdist = PXDIST_LIST), build=target_builds))
+    
+
+rule_all_files=list(rule_all_files)
+
+#print(rule_all_files)
+
+#only convert t2t if this is t2t
+# if(config["is_T2T"]==True):
+# note: current implementation is not flexible to future T2T builds
+if("chm13" in target_builds):
+	output_from_converting_t2t=expand(config["output_dir"]+"/chm13/RSEM/{sample}.chm13ensembl" + ".sorted_opticalDup{pxdist}_" + dupStatus + "_minMQ" + minMapQ + "_rsem.genes.results",
+                                zip, sample=SAMPLES, pxdist = PXDIST_LIST, build=target_builds)
+	rule_all_files.append(output_from_converting_t2t)
+
+rule all:
+    input:
+        rule_all_files
+
+
+rule run_star:
+    input:
+        R1=lambda wildcards: get_fastq(wildcards, read = "1"),
+        R2=lambda wildcards: get_fastq(wildcards, read = "2"),
+        STARANNOT75=lambda wildcards: config["builds"][wildcards.build]["star_annot_ov75"],
+        STARANNOT99=lambda wildcards: config["builds"][wildcards.build]["star_annot_ov99"],
+	star=ancient(config["STAR"])
+    threads: 6
+    params:
+        prefix=lambda wildcards: config["builds"][wildcards.build]["preproccessing_dir"]+"/STAROutput/{sample}_star_{build}_",
+        vcf=get_vcf,
+        this_sample="{sample}",
+        read_len=get_readlen,
+        use_wasp=get_STAR_implementation,
+        message=get_STAR_message
+    resources:
+        time=2160 #,
+    output:
+        this_log=config["output_dir"]+"/{build}/STAROutput/{sample}_star_{build}.log",
+        bam_transcriptome=config["output_dir"]+"/{build}/STAROutput/{sample}_star_{build}_Aligned.toTranscriptome.out.bam",
+        bam_coordinates=config["output_dir"]+"/{build}/STAROutput/{sample}_star_{build}_Aligned.sortedByCoord.out.bam"
+    message: "\nExecuting STAR on {params.this_sample} for {resources.time} mins." + \
+             "\nWASP Implementation: {params.use_wasp}\n"
+    run:
+        shell("""
+            # check read length and load appropriate annotation reference
+            if [[ {params.read_len} -eq 76 ]]
+            then
+                annot={input.STARANNOT75}
+            elif [[ {params.read_len} -ge 100 ]]
+            then
+                annot={input.STARANNOT99}
+            else
+                exit "no proper star annotation file for this read length"
+            fi
+
+            echo "Sample {params.this_sample} has read length {params.read_len} so using for genomeDir $annot" > {output.this_log}
+            echo "STAR Implementaton: {params.message}" > {output.this_log}
+            
+            # if VCF is available, tell STAR to use WASP
+            # this can be updated to use the use_wasp parameter but I was lazy and figured it doesn't hurt to double check
+            # if [[ -f {params.vcf} ]]
+            if [[ {params.use_wasp} == "True" ]]
+            then
+                samTags="NH HI AS nM NM ch vW"
+                waspArgs="--waspOutputMode SAMtag --varVCFfile {params.vcf}"
+                echo "Sample {params.this_sample} alignment with WASP. VCF: {params.vcf}" >> {output.this_log}
+            else
+                samTags="NH HI AS nM NM ch"
+                waspArgs=""
+                echo "Sample {params.this_sample} does not have a VCF prepped for WASP & ASE. Running STAR without WASP." >> {output.this_log}
+            fi
+
+            {input.star} --runMode alignReads \
+                $waspArgs \
+                --runThreadN {threads} \
+                --genomeDir $annot \
+                --twopassMode Basic \
+                --outFilterMismatchNoverLmax 0.1 \
+                --outFilterType BySJout \
+                --outFilterScoreMinOverLread 0.33 \
+                --outFilterMatchNminOverLread 0.33 \
+                --limitSjdbInsertNsj 1200000 \
+                --readFilesIn {input.R1} {input.R2} \
+                --readFilesCommand zcat \
+                --outFileNamePrefix {params.prefix} \
+                --outSAMstrandField intronMotif \
+                --quantMode TranscriptomeSAM GeneCounts \
+                --quantTranscriptomeBAMcompression 9 \
+                --outSAMtype BAM SortedByCoordinate \
+                --outSAMunmapped Within \
+                --genomeLoad NoSharedMemory \
+                --chimSegmentMin 15 \
+                --chimJunctionOverhangMin 15 \
+                --chimOutType Junctions WithinBAM SoftClip \
+                --chimMainSegmentMultNmax 1 \
+                --outSAMattributes $samTags \
+                --outSAMattrRGline ID:rg1 PL:Illumina LB:{params.this_sample} SM:{params.this_sample} >> {output.this_log} # &&
+            # [[ -s {output.bam_coordinates} ]] &&
+            # [[ -s {output.bam_transcriptome} ]] &&
+            # grep -q 'finished successfully' ${output.this_log}
+        """)
+
+rule sort_bam_transcriptome:
+    input:
+        bam=config["output_dir"]+"/{build}/STAROutput/{sample}_star_{build}_Aligned.toTranscriptome.out.bam",
+        samtools=config["samtools"],
+        picard=config["picard"] #depending on which method, remove one picard or samtools
+    params:
+        tmp="{sample}_Aligned.toTranscriptome.tmp" # this is used in one of the tests, can be removed later
+    output:
+        sorted_bam=config["output_dir"]+"/{build}/BAMs/{sample}_star_{build}_Aligned.toTranscriptome.sorted.bam"
+    shell:
+        """
+        # samtools view -h {input.bam} | grep '^@SQ' > {params.tmp}
+        # samtools view {input.bam} | sort -k1,1 -k13,13 --buffer-size=80% --parallel {threads} >> {params.tmp} ##threads: 10
+        # samtools view -b {params.tmp} > {output.sorted_bam}
+        # rm {params.tmp}
+        # samtools sort -m 10G -t HI -n {input.bam} > {output.sorted_bam} # sort on query hit (this should group pairs) and then query name
+        # samtools view -h {input.bam}  | awk '($5>=30)||($1=="@SQ")'| samtools view -Sbh > {params.tmp};
+        {input.samtools} sort -m 10G {input.bam} > {output.sorted_bam}
+        # picard SortSam --INPUT {input.bam} --OUTPUT {output.sorted_bam} --SORT_ORDER queryname
+        """
+
+rule cp_sorted_genome:
+    input:
+        bam=config["output_dir"]+"/{build}/STAROutput/{sample}_star_{build}_Aligned.sortedByCoord.out.bam"
+    output:
+        sorted_bam=config["output_dir"]+"/{build}/BAMs/{sample}_star_{build}_Aligned.sortedByCoord.sorted.bam"
+    shell:
+        """
+    	ln -s {input.bam} {output}
+        """
+
+rule rm_duplicates:
+    input: 
+        picard=config["picard"],
+        bam_sorted=config["output_dir"]+"/{build}/BAMs/{sample}_star_{build}_Aligned.{alignment}.sorted.bam"
+    params:
+        pixel_distance = lambda wildcards: get_optical_dup_distance(wildcards),
+        rm_all = remove_all_duplicates,
+        rm_optical = remove_optical_duplicates,
+        dups_to_tag = mark_duplicates
+    output:
+        bam_dedup=config["output_dir"]+"/{build}/BAMs/{sample}_star_{build}_Aligned.{alignment}.sorted_opticalDup{pxdist}_" + dupStatus + ".bam",
+        metrics=config["output_dir"]+"/{build}/BAMs/{sample}_star_{build}_Aligned.{alignment}_opticalDup{pxdist}_" + dupStatus + "_metrics.log"
+    shell:
+        """
+            #{input.picard} MarkDuplicates  
+	    module load picard/2.22.8; wait; 
+	    #which picard
+            #echo {input.picard}
+            picard MarkDuplicates  \
+                INPUT={input.bam_sorted} \
+                OUTPUT={output.bam_dedup} \
+                CREATE_INDEX=true \
+                VALIDATION_STRINGENCY=SILENT \
+                TAGGING_POLICY={params.dups_to_tag} \
+                OPTICAL_DUPLICATE_PIXEL_DISTANCE={params.pixel_distance} \
+                METRICS_FILE={output.metrics} \
+                REMOVE_DUPLICATES={params.rm_all} \
+                REMOVE_SEQUENCING_DUPLICATES={params.rm_optical}
+        """
+
+rule mapping_filter:
+    input: 
+        # star_log=config["output_dir"]+"/{build}/STAROutput/{sample}_star.log",
+        bam_dedup=config["output_dir"]+"/{build}/BAMs/{sample}_star_{build}_Aligned.{alignment}.sorted_opticalDup{pxdist}_" + dupStatus + ".bam"
+        # bam_file=ancient(expand(config["output_dir"]+"/{build}/STAROutput/{{sample}}_star_{build}_Aligned.{alignment}.out.bam", alignment=["sortedByCoord","toTranscriptome"]))
+    params:
+        # bam_file=config["output_dir"]+"/{build}/STAROutput/{sample}_star_{build}_Aligned.toTranscriptome.out.bam",
+        minMapQ = minMapQ,
+        tmp="{sample}_{alignment}_opticalDup{pxdist}_" + dupStatus + ".tmp"
+    output:
+        bam_filtered=config["output_dir"]+"/{build}/BAMs/{sample}_star_{build}_Aligned.{alignment}.sorted_opticalDup{pxdist}_" + dupStatus + "_minMQ" + minMapQ +".bam"
+    shell:
+        """
+            module load samtools;
+            samtools view --with-header --bam --min-MQ {params.minMapQ} {input.bam_dedup} > {output.bam_filtered} # MAPQ 255 = uniquely mapped reads from STAR
+
+            #samtools view -h {input.bam_dedup}  | awk '($5>=30)||($1=="@SQ")'| samtools view -Sbh > {params.tmp};
+            #wait; echo "VIEWED";
+            #samtools sort -m 10G -T {params.tmp} -o {output.bam_filtered};
+            #samtools sort -m 10G {input.bam_dedup} > {output.bam_filtered};
+            #rm {params.tmp};
+        """
+
+rule convert_bam_for_rsem:
+    input:
+        bam=config["output_dir"]+"/{build}/BAMs/{sample}_star_{build}_Aligned.toTranscriptome.sorted_opticalDup{pxdist}_" + dupStatus + "_minMQ" + minMapQ + ".bam",
+        rsem=ancient(config["rsem"])
+    params:
+        prefix=config["output_dir"]+"/{build}/BAMs/{sample}_star_{build}_Aligned.toTranscriptome.sorted_opticalDup{pxdist}_" + dupStatus + "_minMQ" + minMapQ +"_rsem"
+    output:
+        bam_rsem=config["output_dir"]+"/{build}/BAMs/{sample}_star_{build}_Aligned.toTranscriptome.sorted_opticalDup{pxdist}_" + dupStatus + "_minMQ" + minMapQ +"_rsem.bam"
+    run:
+        shell("""
+        {input.rsem}/convert-sam-for-rsem {input.bam} {params.prefix};
+        # convert-sam-for-rsem calls:
+        #    samtools sort -n -@ 1 -m 1G -o <prefix>.tmp.bam <input_bam>
+        #    rsem-scan-for-paired-end-reads 1 <prefix>.tmp.bam <output_bam>
+        # current issue for non-filtered reads:
+            # The two mates of paired-end read NS500418:643:H23YCBGX3:3:21405:13884:20278 are marked as both mate1 or both mate2!
+            # The input file is not valid!
+        # mv {output.bam_rsem}.bam {output.bam_rsem}
+        """)
+
+rule run_rsem:
+    input:
+        rsem=ancient(config["rsem"]),
+        bam_rsem=config["output_dir"]+"/{build}/BAMs/{sample}_star_{build}_Aligned.toTranscriptome.sorted_opticalDup{pxdist}_" + dupStatus + "_minMQ" + minMapQ + "_rsem.bam"
+    params:
+        rsem_ref=lambda wildcards: config["builds"][wildcards.build]["rsem_ref"],
+        sample_header=config["output_dir"]+"/{build}/RSEM/{sample}.{build}.sorted_opticalDup{pxdist}_" + dupStatus + "_minMQ" + minMapQ + "_rsem"
+    output:
+        this_log=config["output_dir"]+"/{build}/RSEM/{sample}.{build}.sorted_opticalDup{pxdist}_" + dupStatus + "_minMQ" + minMapQ + "_rsem.log",
+        genes=config["output_dir"]+"/{build}/RSEM/{sample}.{build}.sorted_opticalDup{pxdist}_" + dupStatus + "_minMQ" + minMapQ + "_rsem.genes.results",
+        isoforms=config["output_dir"]+"/{build}/RSEM/{sample}.{build}.sorted_opticalDup{pxdist}_" + dupStatus + "_minMQ" + minMapQ + "_rsem.isoforms.results"
+    run:
+        shell("""
+            echo "beginning rsem... " > {output.this_log}
+            {input.rsem}/rsem-calculate-expression -p 4 \
+            --paired-end \
+            --keep-intermediate-files \
+            --forward-prob 0.5 \
+            --seed 12345 \
+            --bam {input.bam_rsem} \
+            {params.rsem_ref} \
+            {params.sample_header} >> {output.this_log}
+            echo "completed." >> {output.this_log}
+        """)
+
+#only runs if is_T2T in config is true
+rule rsem_convert_t2t:
+    input:
+        script=config["scripts_dir"]+"/expression_analysis/convert_t2t_ensg.py",
+        gff=lambda wildcards: config["builds"][wildcards.build]["gff3_unzip"],
+        rsem=config["output_dir"]+"/{build}/RSEM/{sample}.{build}.sorted_opticalDup{pxdist}_" + dupStatus + "_minMQ" + minMapQ + "_rsem.genes.results"
+    output:
+        config["output_dir"]+"/{build}/RSEM/{sample}.{build}ensembl" + ".sorted_opticalDup{pxdist}_" + dupStatus + "_minMQ" + minMapQ + "_rsem.genes.results"
+    shell:
+        """
+        python {input.script} --gff {input.gff} --infile {input.rsem} --outfile {output}
+        """
+
+
+rule get_effective_tpm:
+    input:
+        tpms=config["output_dir"]+"/{build}/RSEM/{sample}.{build}.sorted_opticalDup{pxdist}_" + dupStatus + "_minMQ" + minMapQ + "_rsem.genes.results",
+        script=config["scripts_dir"]+"/fastq_handling/get_effective_tpm.R"
+    output:
+        effective_tpms=config["output_dir"]+"/{build}/RSEM/{sample}.{build}ensemblids"+ ".sorted_opticalDup{pxdist}_" + dupStatus + "_minMQ" + minMapQ + "_rsem.effectiveTPM.genes.results"
+    shell:
+        """
+	module load R
+	Rscript {input.script} --infile {input.tpms} --outfile {output}
+        """
+
+rule multiqc:
+    input:
+        multiqc=config["multiqc"],
+        rsem_dir=config["output_dir"]+"/{build}/RSEM",
+        rsem_bams = expand(config["output_dir"]+"/{build}/BAMs/{sample}_star_{build}_Aligned.toTranscriptome_{build}.sorted_opticalDup{pxdist}_" + dupStatus + "_minMQ" + minMapQ + "_rsem.bam",
+                    sample=SAMPLES, pxdist=PXDIST_LIST, build=target_builds)
+        #rsem_filt = expand(config["output_dir"]+"/{build}/RSEM/{sample}.{build}.sorted_opticalDedup{pxdist}_" + dupStatus + "_filtered_rsem.{type}.results", 
+        #              sample=SAMPLES, pxdist=PXDIST_LIST, type=["genes","isoforms"]) #only used to wait for everything to finish 
+    #wildcard_constraints:
+    #    sample="[A-Z][A-Z][0-9][0-9][0-9]"
+    params:
+        fastqc_dir=config["qc_dir"]+"/FASTQC",
+        star_dir=config["output_dir"]+"/{build}/STAROutput",
+        bam_dir=config["output_dir"]+"/{build}/BAMs",
+        outdir=config["qc_dir"]+"/MultiQC",
+        prefix="multiqc_report_rnaseq_{build}"
+    output:
+        output=config["qc_dir"]+"/MultiQC/multiqc_{build}_" + dupStatus + ".log"
+    shell:
+        """
+        {input.multiqc} -n {params.prefix} -o {params.outdir} -d \
+        --ignore "*__*" \
+        {params.fastqc_dir} \
+        {params.star_dir} \
+        {input.rsem_dir} \
+        {params.bam_dir} > {output}
+        """
+
+rule copy_bam:
+    input:
+        bam_star = config["output_dir"]+"/{build}/STAROutput/{sample}_star_{build}_Aligned.{alignment}.out.bam"
+    params: 
+        bam_copy = lambda wildcards: rename_bam(wildcards)
+    output:
+        config["output_dir"]+"/{build}/STAROutput/{sample}_star_{build}_Aligned.{alignment}.sent.log"
+    shell:
+        """
+        module load samtools &&
+        rsync -a {input} {params} &&
+        date=$(date) &&
+        echo -e "$date\ncp {input} {params}" > {output} &&
+        samtools index {params} &&
+        echo -e "{params} indexed" >> {output}
+        """

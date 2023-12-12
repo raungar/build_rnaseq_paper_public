@@ -1,0 +1,227 @@
+import os, glob, yaml
+import pandas as pd
+
+# get build
+target_builds = config["builds"]
+if "target_build" in config:
+    target_builds = config["target_build"]
+	
+target_build_filnames = target_builds.copy()
+target_build_filnames.extend([build+"ensembl" for build in target_builds if "chm" in build])
+target_builds.extend([build for build in target_builds if "chm" in build])
+
+
+# samples and meta data
+sample_table = pd.read_csv(config["sample_file"], sep='\t').set_index("SAMPLE", drop=False)
+sample_table.index.name = None
+remove_samples=[""]
+#[SAMPLES.remove(x) for x in remove_samples]
+sample_table=sample_table.drop(remove_samples)
+SAMPLES = list(sample_table.index.values)
+GENE_OR_ISOFORMS=["genes"] #,"isoforms"]
+TISSUES=list(sample_table.loc[:,"TISSUE"])
+
+
+#MAPQFILTERS=["sorted_dedup_filtered","sorted_dedup"]
+MAPQFILTERS=["sorted_dedup_filtered"]
+
+def get_tissue(wildcards):
+    return sample_table.loc[(wildcards.sample), "TISSUE"] 
+#print(SAMPLES)
+
+
+# How to handle duplicates
+remove_all_duplicates = config["remove_all_duplicates"]
+remove_optical_duplicates = config["remove_optical_duplicates"]
+mark_duplicates = config["mark_duplicates"]
+
+if remove_all_duplicates:
+    dupStatus = "dedupAll"
+elif remove_optical_duplicates:
+    dupStatus = "dedupOptical"
+else:
+    dupStatus = "dedupNone"
+minMapQ = config["min_mapping_quality"]
+
+#doing this to keep consistent naming practices
+def get_tissue(wildcards):
+	if(wildcards.tissue=="Blood"):
+		return "Whole_Blood"
+	elif (wildcards.tissue=="Muscle"):
+		return "Muscle_Skeletal"
+	elif (wildcards.tissue=="Fibroblast"):
+		return "Cells_Cultured_fibroblasts"
+	elif (wildcards.tissue=="Heart"):
+		return "Heart_Left_Ventricle"
+	else:
+		return "ERROR"
+# pixel distance from sample
+def get_optical_dup_distance(wildcards):
+    if "PIXEL_DIST" in sample_table:
+        return sample_table.loc[(wildcards.sample), "PIXEL_DIST"]
+    elif "pixel_distance" in config:
+        return config["pixel_distance"]
+    else:
+        return "100"
+
+# get pixel distance as a wildcard list
+if "PIXEL_DIST" in sample_table:
+    PXDIST_LIST = list(sample_table.PIXEL_DIST)
+elif "pixel_distance" in config:
+    PXDIST_LIST = [ config["pixel_distance"] ] * len(sample_table.index)
+else:
+    PXDIST_LIST = [100] * len(sample_table.index)
+
+print(PXDIST_LIST)
+# How to handle duplicates
+remove_all_duplicates = config["remove_all_duplicates"]
+remove_optical_duplicates = config["remove_optical_duplicates"]
+mark_duplicates = config["mark_duplicates"]
+
+ALIGNMENTS = ["sortedByCoord"] #,"toTranscriptome"]
+
+
+if remove_all_duplicates:
+    dupStatus = "dedupAll"
+elif remove_optical_duplicates:
+    dupStatus = "dedupOptical"
+else:
+    dupStatus = "dedupNone"
+minMapQ = config["min_mapping_quality"]
+
+
+EXONS=['ENSE00003976810','ENSE00002447228','ENSE00003976808','ENSE00003976798','ENSE00003976807']
+
+rule all:
+	input:
+	# 	expand(expand(config["output_dir"]+"/{build}/eOutliers/{{tissue}}.{build_id}." + dupStatus + "_minMQ" + minMapQ + "_rsem.{{gene_or_isoform}}.results",
+	# 		zip, build=target_builds, build_id=target_build_filnames),tissue=TISSUES, gene_or_isoform=GENE_OR_ISOFORMS),
+	# # expand(expand(config["output_dir"]+"/{build}/eOutliers/{{tissue}}.{build_id}.sorted_opticalDup" + dupStatus + "_minMQ" + minMapQ + "_rsem.{{gene_or_isoform}}.zscores.txt",
+	# # 	zip, build=target_builds, build_id=target_build_filnames), tissue=TISSUES, gene_or_isoform=GENE_OR_ISOFORMS),
+	# 	expand(expand(config["output_dir"]+"/{build}/eOutliers/{{tissue}}.{build}.sorted_opticalDup" + dupStatus + "_minMQ" + minMapQ + "_rsem.{{gene_or_isoform}}.split_by_sample.log",
+	#  		zip, build=target_builds, build_id=target_build_filnames), tissue=TISSUES, gene_or_isoform=GENE_OR_ISOFORMS),
+		expand(expand(config["output_dir"]+"/{{build}}/Analyses/ExonCounts/FAM177A1_exon_counts_{sample}_{{build}}_{{alignment}}.sorted_opticalDup{pxdist}_" + dupStatus + "_minMQ" + minMapQ +".txt",
+		zip, sample=SAMPLES, pxdist = PXDIST_LIST), alignment=ALIGNMENTS, build=target_builds)
+		# expand(expand(config["output_dir"]+"/{{build}}/Analyses/ExonCounts/FAM177A1_exon_counts_{sample}_{{build}}_{{alignment}}.sorted_opticalDup{pxdist}_" + dupStatus + "_minMQ" + minMapQ +".{{exon}}.txt",
+		# 		zip, sample=SAMPLES, pxdist = PXDIST_LIST), alignment=ALIGNMENTS, build=target_builds,exon=EXONS),
+		# expand(expand(config["output_dir"]+"/{{build}}/Analyses/ExonCounts/FAM177A1_exon_counts_{sample}_{{build}}_{{alignment}}.sorted_opticalDup{pxdist}_" + dupStatus + "_minMQ" + minMapQ +"_allExons.txt",
+		# 		zip, sample=SAMPLES, pxdist = PXDIST_LIST), alignment=ALIGNMENTS, build=target_builds,exon=EXONS)
+
+
+rule get_rsem_by_tiss:
+	input:
+		files = lambda wildcards: expand(expand(config["output_dir"]+"/{{build}}/RSEM/{sample}.{{build_id}}.sorted_opticalDup{pxdist}_" + dupStatus + "_minMQ" + minMapQ + "_rsem.{{gene_or_isoform}}.results", 
+					 zip, sample=SAMPLES, pxdist=PXDIST_LIST),
+					 build=wildcards.build, build_id = wildcards.build_id, gene_or_isoform=GENE_OR_ISOFORMS)	
+	resources:
+		mem_mb=9000
+	params:
+		tissue="{tissue}",
+		delim="." #"_" #delim to extract sample
+	output:
+		counts=config["output_dir"]+"/{build}/eOutliers/{tissue}.{build_id}." + dupStatus + "_minMQ" + minMapQ + "_rsem.{gene_or_isoform}.results"
+	run:
+		for f in input:
+			#sample=split(split(f,"/")[-1],params[1])
+			sample=(((f.split("/"))[-1]).split(params[1]))[0]
+			this_samples_tissue=sample_table.loc[sample, "TISSUE"]
+			if(this_samples_tissue == params[0]):
+				shell("""tail -n +2 """+f+""" | awk -F"\t" -v sample="""+sample+""" '{{print sample"\t"$1"\t"$2"\t"$6}}' >> {output}""")
+
+rule get_eoutlier_gene_or_isoform:
+	input:
+		counts=config["output_dir"]+"/{build}/eOutliers/{tissue}.{build_id}." + dupStatus + "_minMQ" + minMapQ + "_rsem.{gene_or_isoform}.results",
+		outlier_script=ancient(config["scripts_dir"]+"/expression_analysis/TPM_to_Zscore.R"),
+		metadata=config["sample_file"]
+	params:
+		tissue="{tissue}" #CASE SENSITIVE
+	resources:
+		mem_mb=10000
+	output:
+		zscores=config["output_dir"]+"/{build}/eOutliers/{tissue}.{build_id}.sorted_opticalDup" + dupStatus + "_minMQ" + minMapQ + "_rsem.{gene_or_isoform}.zscores.txt",
+		resids_file=config["output_dir"]+"/{build}/eOutliers/{tissue}.{build_id}.sorted_opticalDup" + dupStatus + "_minMQ" + minMapQ + "_rsem.{gene_or_isoform}.svaresids.txt"
+	shell:
+		"""
+		module load R
+		Rscript {input.outlier_script} \
+			--metadata {input.metadata} \
+			--counts {input.counts} \
+			--tissue {params.tissue} --outfile {output.zscores} \
+		    --resids_file {output.resids_file} 
+		 """
+#		outfile_transformed=config["output_dir"]+"/{build}/eOutliers/{tissue}.{build_id}.sorted_opticalDup" + dupStatus + "_minMQ" + minMapQ + "_rsem.{gene_or_isoform}.transformedbeforesva.txt",
+
+
+###NEED TO MAKE FLEXIBLE FOR OTHER NAMING CONVENTIONS
+rule split_by_sample:
+	input:
+		zscores=config["output_dir"]+"/{build}/eOutliers/{tissue}.{build_id}.sorted_opticalDup" + dupStatus + "_minMQ" + minMapQ + "_rsem.{gene_or_isoform}.zscores.txt"
+	params:
+		outdir=config["output_dir"]+"/{build}/eOutliers/SplitByInd/",
+		exp_type="{gene_or_isoform}",
+		sample_prefix="RD"
+	output:
+		log=config["output_dir"]+"/{build}/eOutliers/{tissue}.{build_id}.sorted_opticalDup" + dupStatus + "_minMQ" + minMapQ + "_rsem.{gene_or_isoform}.split_by_sample.log"
+	shell:
+		"""
+		mkdir -p {params.outdir}
+		cat {input} | \
+			grep {params.sample_prefix} | \
+			awk -F"\t" -v prefix={params.outdir} -v exptype={params.exp_type} '{{print (!a[$1]++? $0 : $0)  > prefix$1"."exptype".txt"}}' | \
+			> {output}
+		"""
+rule get_exon_counts:
+	input:
+		gtf=lambda wildcards: config["builds"][wildcards.build]["gtf_unzip"], #genome align only!!!
+		bam_filtered=config["output_dir"]+"/{build}/BAMs/{sample}_star_{build}_Aligned.{alignment}.sorted_opticalDup{pxdist}_" + dupStatus + "_minMQ" + minMapQ +".bam",
+		featureCounts=config['featureCounts']
+	output:
+		outfile=config["output_dir"]+"/{build}/Analyses/ExonCounts/exon_counts_{sample}_{build}.{alignment}.sorted_opticalDup{pxdist}_" + dupStatus + "_minMQ" + minMapQ +".txt"
+	shell:
+		"""
+		#-p is paired end, -O assigns reads to all their overlapping meta-featuers, -g does at exon-id level rather than gene
+		{input.featureCounts} -p -O -g exon_id -a {input.gtf} -o {output.outfile} {input.bam_filtered}
+		"""
+rule get_exons_for_gene:
+	input:
+		exons=config["output_dir"]+"/{build}/Analyses/ExonCounts/exon_counts_{sample}_{build}.{alignment}.sorted_opticalDup{pxdist}_" + dupStatus + "_minMQ" + minMapQ +".txt",
+		exon_names_fam177a1='/oak/stanford/groups/smontgom/raungar/UDN/FAM177A1_exons1-5.ENST00000280987.txt'
+	params:
+		sample="{sample}"
+	output:
+		outfile_tmp=temp(config["output_dir"]+"/{build}/Analyses/ExonCounts/FAM177A1_exon_counts_{sample}_{build}_{alignment}.sorted_opticalDup{pxdist}_" + dupStatus + "_minMQ" + minMapQ +".txt.tmp"),
+		outfile=config["output_dir"]+"/{build}/Analyses/ExonCounts/FAM177A1_exon_counts_{sample}_{build}_{alignment}.sorted_opticalDup{pxdist}_" + dupStatus + "_minMQ" + minMapQ +".txt"
+	shell:
+		"""
+		grep -f {input.exon_names_fam177a1} {input.exons} > {output.outfile_tmp}
+		this_sample="{params.sample}"
+		awk -v sample="$this_sample" -F"\t" '{{print sample"\t"$0}}' {output.outfile_tmp} > {output.outfile}
+
+		"""
+
+# rule pull_exons_of_interest:
+# 	input:
+# 		config["output_dir"]+"/{build}/Analyses/ExonCounts/FAM177A1_exon_counts_{sample}_{build}_{alignment}.sorted_opticalDup{pxdist}_" + dupStatus + "_minMQ" + minMapQ +".txt"
+# 	params:
+# 		exon="{exon}",
+# 		sample="{sample}"
+# 	output:
+# 		temp(config["output_dir"]+"/{build}/Analyses/ExonCounts/FAM177A1_exon_counts_{sample}_{build}_{alignment}.sorted_opticalDup{pxdist}_" + dupStatus + "_minMQ" + minMapQ +".{exon}.txt")
+# 	shell:
+# 		"""
+# 		if grep -q {params.exon} {input} || false
+# 		then
+# 			line=`grep {params.exon} {input}`; echo {params.sample}'\t'$line > {output}
+# 		else
+# 			touch {output}
+# 		fi 
+# 		"""
+# rule combine_exons_per_sample:
+# 	input:
+# 		expand(config["output_dir"]+"/{{build}}/Analyses/ExonCounts/FAM177A1_exon_counts_{sample}_{{build}}_{{alignment}}.sorted_opticalDup{{pxdist}}_" + dupStatus + "_minMQ" + minMapQ +".{exon}.txt",exon=EXONS,sample=SAMPLES)
+# 	output:
+# 		config["output_dir"]+"/{build}/Analyses/ExonCounts/FAM177A1_exon_counts_{sample}_{build}_{alignment}.sorted_opticalDup{pxdist}_" + dupStatus + "_minMQ" + minMapQ +"_allExons.txt"
+# 	shell:
+# 		"""
+# 		cat {input} > {output}
+# 		"""
