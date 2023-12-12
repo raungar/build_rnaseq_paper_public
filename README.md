@@ -6,9 +6,11 @@ This pipeline is an iteration on the pipeline released in the paper [Identificat
 
 # Pipeline Overview
 ![alt text](readme_pics/GenomeBuildPipeline.png)
+Under scripts
 
 # Analysis Overview
 ![alt text](readme_pics/AnalysisPipeline.png)
+Under analysis_scripts
 
 
 # Installation Preparation
@@ -21,7 +23,7 @@ This pipeline is an iteration on the pipeline released in the paper [Identificat
 
 * install snakemake via conda and mamba as recommended [here](https://snakemake.readthedocs.io/en/stable/getting_started/installation.html)
 
-    ```
+ n   ```
     conda install -c conda-forge mamba
     mamba create -c conda-forge -c bioconda -n snakemake snakemake
     conda activate snakemake
