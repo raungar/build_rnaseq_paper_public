@@ -5,7 +5,11 @@ This pipeline is an iteration on the pipeline released in the paper [Identificat
 
 
 # Pipeline Overview
-![alt text](GenomeBuildPipeline.png)
+![alt text](readme_pics/GenomeBuildPipeline.png)
+
+# Analysis Overview
+![alt text](readme_pics/AnalysisPipeline.png)
+
 
 # Installation Preparation
 * if necessary, install Miniconda as recommended [here](https://docs.conda.io/projects/conda/en/latest/user-guide/install/linux.html)
